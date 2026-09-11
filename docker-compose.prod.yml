@@ -40,10 +40,12 @@ services:
       test: ["CMD", "mc", "ready", "local"]
       interval: 10s
       retries: 10
+    # Not published. nginx terminates TLS for it on :9000 — a browser on an
+    # https page refuses to PUT to plain http, so the old direct exposure
+    # cannot work once there is a real domain.
+    expose: ["9000"]
     ports:
-      # 9000 must stay reachable by browsers: phones PUT photos straight to it.
-      - "9000:9000"
-      # 9001 is the admin console — keep it on loopback and reach it over SSH.
+      # the admin console stays on loopback; reach it over an SSH tunnel
       - "127.0.0.1:9001:9001"
 
   app:
@@ -62,7 +64,10 @@ services:
       MINIO_ENDPOINT: http://minio:9000
       # left empty on purpose: the upload link is signed for whatever host the
       # request arrived on, so it works from a laptop and a phone at once.
-      MINIO_PUBLIC_ENDPOINT: ${MINIO_PUBLIC_ENDPOINT:-}
+      # Photos are uploaded straight to storage by the phone, so the link has
+      # to name a host the phone can reach over TLS. nginx serves MinIO on the
+      # same domain, port 9000, with the same certificate.
+      MINIO_PUBLIC_ENDPOINT: ${MINIO_PUBLIC_ENDPOINT:-https://${DOMAIN}:9000}
       MINIO_ACCESS_KEY: ${MINIO_USER}
       MINIO_SECRET_KEY: ${MINIO_PASSWORD}
       MINIO_BUCKET: ${MINIO_BUCKET:-falaq-photos}
@@ -95,15 +100,46 @@ services:
       context: ./web
     restart: unless-stopped
     environment:
+      DOMAIN: ${DOMAIN:?set DOMAIN, e.g. sotuv.falaq.uz}
       APP_UPSTREAM: app:3000
+      MINIO_UPSTREAM: minio:9000
     depends_on:
       # the app image carries a HEALTHCHECK, so wait for it to actually serve
       app: { condition: service_healthy }
+      minio: { condition: service_healthy }
+    volumes:
+      - certs:/etc/letsencrypt
+      - certbot-www:/var/www/certbot
     ports:
-      # 80, 3000, 8000 and 8080 are all taken on the dev machine, so this
-      # project owns 4300/4301. Change it once a domain points at the box.
-      - "${WEB_PORT:-4300}:80"
+      - "80:80"      # ACME challenge + redirect to https
+      - "443:443"    # the application
+      - "9000:9000"  # photo storage, same certificate
+
+  # Issues and renews the certificate. It shares the webroot with nginx, so the
+  # challenge is written where nginx is already serving it; nginx reloads on a
+  # timer and picks up a renewed certificate without a restart.
+  certbot:
+    image: certbot/certbot
+    restart: unless-stopped
+    depends_on:
+      - web
+    volumes:
+      - certs:/etc/letsencrypt
+      - certbot-www:/var/www/certbot
+    entrypoint: >
+      sh -c 'trap exit TERM;
+             while :; do
+               certbot certonly --webroot -w /var/www/certbot
+                 -d "$${DOMAIN}" --email "$${LETSENCRYPT_EMAIL}"
+                 --agree-tos --no-eff-email --keep-until-expiring --non-interactive || true;
+               sleep 12h & wait $${!};
+             done'
+    environment:
+      DOMAIN: ${DOMAIN}
+      LETSENCRYPT_EMAIL: ${LETSENCRYPT_EMAIL:?set LETSENCRYPT_EMAIL}
 
 volumes:
   pgdata:
   miniodata:
+  certs:
+  certbot-www:

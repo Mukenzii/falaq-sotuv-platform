@@ -1,7 +1,131 @@
-# Falaq Nashr — store visit system
+# Falaq Sotuv — sotuv.falaq.uz
 
-Field managers record bookstore visits. Hierarchy: direktor > sotuv_boshligi >
-hudud_rahbari > sotuv_manager. Each person sees only themselves and their own team.
+Field managers record bookstore visits from a phone. The office tracks the
+weekly round, the must-have assortment (MML), and pushes everything to Google
+Sheets. Sign-in is a Telegram bot — there are no passwords in the system.
+
+## Deploying
+
+Everything runs in containers: postgres, minio, the Next app, an nginx that
+serves the frontend and terminates TLS, and certbot. Nothing else is installed
+on the server.
+
+### 1. Before you start
+
+- A server with Docker Engine and the compose plugin (`docker compose version`)
+- **DNS first.** An A record for `sotuv.falaq.uz` must already point at the
+  server. Let's Encrypt verifies over port 80; without the record the first
+  start comes up on a self-signed certificate and browsers will warn.
+- Ports **80**, **443** and **9000** open. 9000 is not optional: phones upload
+  shelf photos straight to storage, and nginx serves it there under the same
+  certificate.
+- About 2 GB of RAM.
+
+### 2. Configure
+
+    git clone git@github.com:Mukenzii/falaq-sotuv-platform.git
+    cd falaq-sotuv-platform
+    cp .env.example .env.prod
+
+Fill in every value in `.env.prod`. It is never committed. Generate the
+secrets rather than inventing them:
+
+    openssl rand -hex 32        # SESSION_SECRET
+    openssl rand -hex 24        # DB_PASSWORD, APP_DB_PASSWORD, MINIO_PASSWORD
+
+Two that are easy to miss:
+
+- `APP_DB_PASSWORD` — `db/00_roles.sql` reads it to create the application's
+  database role. Without it the role falls back to the development password
+  that is written down in this repository.
+- `LETSENCRYPT_EMAIL` — where expiry warnings go. certbot refuses without it.
+
+### 3. Start
+
+    docker compose -f docker-compose.prod.yml --env-file .env.prod up -d --build
+
+The first run creates the database volume and replays every `db/*.sql` in
+order. nginx comes up immediately on a temporary self-signed certificate so it
+can answer the Let's Encrypt challenge; certbot then issues the real one and
+nginx picks it up within twelve hours, or immediately if you reload it:
+
+    docker compose -f docker-compose.prod.yml --env-file .env.prod exec web nginx -s reload
+
+Watch it settle:
+
+    docker compose -f docker-compose.prod.yml --env-file .env.prod ps
+    docker compose -f docker-compose.prod.yml --env-file .env.prod logs -f certbot
+
+All five services report `healthy`. Then open **https://sotuv.falaq.uz**.
+
+### 4. The first sign-in
+
+A fresh install has exactly **one** user: the direktor in `db/03_seed.sql`.
+Change the telegram id there before the first start if it should be somebody
+else. Everyone after that joins the real way — they press START in
+`@falaqreaderbot`, a request appears on `/admin/sozlash`, and an admin approves
+it. No telegram id is ever typed by hand.
+
+There is deliberately no back door. If the seeded account is wrong and the
+database is already running:
+
+    docker compose -f docker-compose.prod.yml --env-file .env.prod exec -T db \
+      psql -U falaq_owner -d falaq \
+      -c "update users set telegram_id = <id> where role = 'direktor';"
+
+### 5. Google Sheets
+
+One service account, no OAuth and no consent screen. Share the spreadsheet
+that **receives** visits with the service account as **Editor**, and the
+must-list sheet as **Viewer**. A sheet that is not shared returns
+`PERMISSION_DENIED`, and the sync button says so rather than failing quietly.
+
+Visits push themselves as soon as they are saved; `/admin/sheets` shows the
+last successful push and any error.
+
+### 6. Updating
+
+    git pull
+    docker compose -f docker-compose.prod.yml --env-file .env.prod up -d --build
+
+**New `db/*.sql` files are not applied automatically.** The init directory only
+runs on an empty volume, so apply them yourself, in order:
+
+    docker compose -f docker-compose.prod.yml --env-file .env.prod exec -T db \
+      psql -v ON_ERROR_STOP=1 -U falaq_owner -d falaq < db/17_rename_mlrr_to_mml.sql
+
+Every migration is written to be safe to re-run.
+
+### 7. Backups
+
+    docker compose -f docker-compose.prod.yml --env-file .env.prod exec -T db \
+      pg_dump -U falaq_owner -d falaq | gzip > falaq-$(date +%F).sql.gz
+
+Photos live in the `miniodata` volume; back that up too if they matter.
+Restore with `gunzip -c … | psql -U falaq_owner -d falaq` into a fresh volume.
+
+### 8. What is exposed, and what is not
+
+| port | what | why |
+|---|---|---|
+| 80 | certificate renewal, redirect to https | Let's Encrypt needs it |
+| 443 | the application | |
+| 9000 | photo storage over TLS | phones PUT straight to it |
+| 9001 | MinIO console, **loopback only** | `ssh -L 9001:127.0.0.1:9001 user@server` |
+| — | postgres | never published; only the app reaches it |
+
+### 9. Things that will bite you
+
+- **Never run `scripts/demo-*.sql` against production.** They invent visits.
+  They live in `scripts/`, never in `db/`, so nothing loads them automatically.
+- **Leave `MINIO_PUBLIC_ENDPOINT` empty.** It defaults to
+  `https://sotuv.falaq.uz:9000`, which is where nginx serves storage. An upload
+  link is signed over the hostname, so a wrong value breaks photo upload with a
+  signature error rather than a clear one.
+- **Leave `COOKIE_SECURE` empty.** The session cookie follows
+  `X-Forwarded-Proto`. Hardcoding it wrong logs everybody out, silently.
+- A TLS terminator in front of this one must pass `Host` through unchanged —
+  the upload links and the login redirect are built from it.
 
 ## Stack
 
@@ -9,61 +133,13 @@ hudud_rahbari > sotuv_manager. Each person sees only themselves and their own te
 - PostgreSQL 16, self-hosted — hierarchy enforced by RLS in the database
 - Drizzle ORM, always via `asUser()` in `lib/db.ts`
 - MinIO for shelf photos, presigned uploads
-- Telegram Login, no passwords
-
-## Local setup
-
-    cp .env.example .env          # fill in the Telegram and Google values
-    docker compose up -d          # postgres on 5433, minio on 9000
-    ./scripts/load.sh             # runs every db/*.sql in order
-    npm run dev                   # http://localhost:4300
-
-Ports: this project uses **4300** (app) and **4301** (the separated frontend
-container). 80, 3000, 8000 and 8080 are deliberately avoided.
-
-## Opening it from a phone on the same wifi
-
-    npm run dev            # already listens on all interfaces
-
-`next dev` prints the address it is reachable on; find it again with
-
-    ipconfig getifaddr en0                 # e.g. 192.168.0.153
-    echo "$(scutil --get LocalHostName).local"   # e.g. macbook-air-user.local
-
-Prefer the `.local` name: the router hands out a new lease every so often and the
-IP changes with it, but the mDNS name does not. Both work, including the dev
-login — `.local` is a reserved link-local TLD, so allowing it does not weaken the
-"never over a public hostname" rule.
-
-Both the app (4300) and MinIO (9000) bind to every interface, so nothing else is
-needed as long as the macOS firewall is off or node is allowed through. Photo
-uploads work because the presigned URL is signed for the host the request arrived
-on, not for `localhost` — leave `MINIO_PUBLIC_ENDPOINT` empty so it is derived
-per request. Setting it pins every phone to one address.
-
-Login is Telegram, and only Telegram, on every address — the login widget was
-dropped precisely because it needs one registered domain. The browser mints a
-nonce, you press START in @falaqreaderbot, the bot's update carries the nonce
-back and the waiting page logs itself in.
-
-There is deliberately no back door, so a database with no reachable Telegram
-account in it locks everyone out. Point the direktor row at a real account
-before you need it:
-
-    docker compose exec -T db psql -U falaq_owner -d falaq \
-      -c "update users set telegram_id = <id> where role = 'direktor';"
+- Telegram bot login, no passwords and no registered domain needed
 
 ## Why compose and not Kubernetes
 
 Three services on one node with a dozen users. Compose does this in 100 lines;
 k8s would add a control plane, ingress, storage classes and secrets to manage,
 and would still be a single point of failure on one VDS.
-
-The MinIO console is bound to 127.0.0.1, so reach it over a tunnel:
-
-    ssh -L 9001:127.0.0.1:9001 user@vds
-
-Deployment steps are in **Deploying to a server** at the end of this file.
 
 ## The form
 
@@ -111,119 +187,3 @@ so a preview cannot flatter a form that would behave differently in the field.
   in the admin panel. `db/03_seed.sql` holds placeholder people with fake
   `9000000xx` ids; only Komil's id is real.
 
-## Deploying to a server
-
-Everything runs in containers — postgres, minio, the Next app, and an nginx
-that serves the frontend and proxies `/api`. Nothing else needs installing on
-the box except Docker.
-
-### 1. What the server needs
-
-- Docker Engine with the compose plugin (`docker compose version`)
-- Ports: whatever you choose for `WEB_PORT`, plus **9000** for MinIO. 9000 must
-  be reachable by phones — they upload shelf photos straight to it, not through
-  the app.
-- About 2 GB of RAM. Postgres, MinIO and one Node process are all small; the
-  build is the heaviest moment.
-
-### 2. Get the code and the secrets
-
-    git clone git@github.com:Mukenzii/falaq-sotuv-platform.git
-    cd falaq-sotuv-platform
-    cp .env.example .env.prod
-
-Fill in **every** value in `.env.prod`. It is never committed — `.gitignore`
-covers `.env.*`. Generate the secrets rather than inventing them:
-
-    openssl rand -hex 32        # SESSION_SECRET
-    openssl rand -hex 24        # DB_PASSWORD, APP_DB_PASSWORD, MINIO_PASSWORD
-
-`APP_DB_PASSWORD` is not optional. `db/00_roles.sql` reads it to create the
-application's database role; without it the role falls back to the development
-password that is written down in this repository.
-
-### 3. Start it
-
-    docker compose -f docker-compose.prod.yml --env-file .env.prod up -d --build
-
-The first run creates the database volume and replays every `db/*.sql` in
-order. That happens **only on an empty volume** — later migrations have to be
-applied by hand (see below). Watch it come up:
-
-    docker compose -f docker-compose.prod.yml --env-file .env.prod ps
-    docker compose -f docker-compose.prod.yml --env-file .env.prod logs -f app
-
-All four services report `healthy` when it is ready. Then open
-`http://SERVER:WEB_PORT/login`.
-
-### 4. Who can get in
-
-A fresh install has exactly **one** user: the direktor in `db/03_seed.sql`.
-Change the telegram id in that file before the first start if it should be
-somebody else. Everyone after that joins the real way — they press START in the
-bot, and an admin approves them on `/admin/sozlash`. No telegram id is ever
-typed by hand, and there is no password anywhere in the system.
-
-If the seeded account is wrong and the database is already running:
-
-    docker compose -f docker-compose.prod.yml --env-file .env.prod exec -T db \
-      psql -U falaq_owner -d falaq \
-      -c "update users set telegram_id = <id> where role = 'direktor';"
-
-There is deliberately no back door, so do this before you need it.
-
-### 5. Put TLS in front
-
-The session cookie follows `X-Forwarded-Proto`: it is `Secure` over https and
-plain over http, so the app works either way. Over plain http the session
-travels in clear text, which is fine on a closed network and not fine on the
-internet. For a real domain, terminate TLS in front (Caddy and nginx both do
-this in a few lines), point it at `WEB_PORT`, and make sure it forwards
-`Host` and `X-Forwarded-Proto` unchanged — the photo upload links and the login
-redirect are both built from the request's own `Host`.
-
-If your TLS terminator does not set `X-Forwarded-Proto`, set `COOKIE_SECURE=true`.
-
-### 6. Updating a running deployment
-
-    git pull
-    docker compose -f docker-compose.prod.yml --env-file .env.prod up -d --build
-
-New `db/*.sql` files are **not** applied automatically — the init directory only
-runs on an empty volume. Apply them yourself, in order:
-
-    docker compose -f docker-compose.prod.yml --env-file .env.prod exec -T db \
-      psql -v ON_ERROR_STOP=1 -U falaq_owner -d falaq < db/17_rename_mlrr_to_mml.sql
-
-Every migration is written to be safe to re-run.
-
-### 7. Backups
-
-The data is one volume. Dump it on a schedule:
-
-    docker compose -f docker-compose.prod.yml --env-file .env.prod exec -T db \
-      pg_dump -U falaq_owner -d falaq | gzip > falaq-$(date +%F).sql.gz
-
-Photos live in the `miniodata` volume; back that up too if the shelf photos
-matter. Restoring is `gunzip -c … | psql -U falaq_owner -d falaq` into a fresh
-volume, then start the stack.
-
-### 8. Google Sheets
-
-Both integrations use one service account — no OAuth, no consent screen.
-Share the spreadsheet that receives visits with the service account as
-**Editor**, and the must-list sheet as **Viewer**. A sheet that is not shared
-returns `PERMISSION_DENIED` and the sync button says so.
-
-Visits push themselves to Sheets as soon as they are saved; `/admin/sheets`
-shows the last successful push and any error.
-
-### 9. Things that will bite you
-
-- **Do not run `scripts/demo-*.sql` against production.** They invent visits.
-  They live in `scripts/`, never in `db/`, so nothing loads them automatically.
-- **MinIO's 9000 must stay open to phones.** The upload URL is signed for the
-  host the request arrived on, so it works from a laptop and a phone at once —
-  leave `MINIO_PUBLIC_ENDPOINT` empty unless MinIO has its own fixed name.
-- **Postgres is not published.** Only the app reaches it, over the compose
-  network. MinIO's console is bound to loopback; reach it over an SSH tunnel.

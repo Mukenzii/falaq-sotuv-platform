@@ -1,28 +1,59 @@
-# One origin in front of two containers.
+# sotuv.falaq.uz — the only way into the system.
 #
-# The SPA owns only the routes it has actually ported; everything else still
-# reaches the Next app, so the port can finish page by page without the site
-# breaking in between.
+# One origin in front of two containers: this nginx serves the built frontend,
+# proxies /api to the app, and hands every page the SPA has not taken over back
+# to the Next app. It also terminates TLS for MinIO on :9000, because phones
+# upload photos straight there and a browser on an https page refuses to make a
+# plain-http request.
 #
 # Host is passed through untouched on purpose: the MinIO presign, the Telegram
-# login redirect and the dev-host guards all derive their origin from the
-# request's own Host header, and rewriting it here would sign uploads for the
-# wrong address.
+# login redirect and the session cookie's Secure flag are all derived from the
+# request's own Host and X-Forwarded-Proto.
 
-# Filled in at container start by nginx's own envsubst step, so the same image
-# can point at the compose service or at a host during testing.
-upstream app { server ${APP_UPSTREAM}; }
+upstream app   { server ${APP_UPSTREAM}; }
+upstream photos { server ${MINIO_UPSTREAM}; }
 
+# ─── http: certificate renewal, and a push to https ──────────────────────────
 server {
   listen 80;
-  server_name _;
-  client_max_body_size 25m;          # photos go straight to MinIO, but be safe
+  listen [::]:80;
+  server_name ${DOMAIN};
+
+  # Let's Encrypt writes its challenge here; this must stay reachable on :80
+  # for renewals, so it is matched before the redirect.
+  location ^~ /.well-known/acme-challenge/ {
+    root /var/www/certbot;
+    default_type "text/plain";
+  }
+
+  location / { return 301 https://$host$request_uri; }
+}
+
+# ─── https: the application ──────────────────────────────────────────────────
+server {
+  listen 443 ssl;
+  listen [::]:443 ssl;
+  http2 on;
+  server_name ${DOMAIN};
   root /usr/share/nginx/html;
 
-  # nginx builds redirects as absolute URLs from server_name and its OWN port,
-  # so behind a published port (4301:80) a 301 lost the port and sent the
-  # browser to the wrong place. Relative redirects resolve against whatever
-  # origin the browser already has.
+  ssl_certificate     /etc/letsencrypt/live/${DOMAIN}/fullchain.pem;
+  ssl_certificate_key /etc/letsencrypt/live/${DOMAIN}/privkey.pem;
+  ssl_protocols TLSv1.2 TLSv1.3;
+  ssl_prefer_server_ciphers off;
+  ssl_session_cache shared:SSL:10m;
+  ssl_session_timeout 1d;
+
+  # A year, and only once the certificate is real — a self-signed fallback with
+  # HSTS set would lock browsers out of the domain.
+  add_header Strict-Transport-Security "max-age=31536000" always;
+  add_header X-Content-Type-Options "nosniff" always;
+  add_header Referrer-Policy "strict-origin-when-cross-origin" always;
+
+  client_max_body_size 25m;
+
+  # nginx builds redirects as absolute URLs from server_name and its own listen
+  # port, which loses a non-standard port. Relative ones resolve correctly.
   absolute_redirect off;
 
   proxy_set_header Host              $http_host;
@@ -31,22 +62,49 @@ server {
   proxy_set_header X-Forwarded-Proto $scheme;
   proxy_http_version 1.1;
 
-  # --- the API always belongs to the app container
   location /api/ { proxy_pass http://app; }
 
-  # --- the SPA's own build output, content-hashed so it can be cached hard
+  # content-hashed, so it can be cached hard
   location /assets/ {
     try_files $uri =404;
     expires 1y;
     add_header Cache-Control "public, immutable";
   }
 
-  # --- routes the SPA has taken over
+  # routes the separated frontend has taken over
   location = /login { try_files /index.html =404; }
   location /mml     { try_files /index.html =404; }
-  # the page was called MLRR until 2026-09-11; keep old links working
-  location /mlrr    { return 301 /mml; }
+  location /mlrr    { return 301 /mml; }   # renamed 2026-09-11
 
-  # --- everything not yet ported is still served by Next
+  # everything not yet ported is still served by Next
   location / { proxy_pass http://app; }
+}
+
+# ─── https: photo storage ────────────────────────────────────────────────────
+# Same certificate, same hostname, different port, so no extra DNS record. The
+# app signs upload links for https://${DOMAIN}:9000 and the phone PUTs straight
+# here — the bytes never pass through the Next server.
+server {
+  listen 9000 ssl;
+  listen [::]:9000 ssl;
+  http2 on;
+  server_name ${DOMAIN};
+
+  ssl_certificate     /etc/letsencrypt/live/${DOMAIN}/fullchain.pem;
+  ssl_certificate_key /etc/letsencrypt/live/${DOMAIN}/privkey.pem;
+  ssl_protocols TLSv1.2 TLSv1.3;
+
+  # a shelf photo is downscaled to 1600px before upload, but leave headroom
+  client_max_body_size 50m;
+  # S3 signatures cover the Host header, so it must arrive unchanged
+  proxy_set_header Host $http_host;
+  proxy_set_header X-Real-IP $remote_addr;
+  proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+  proxy_set_header X-Forwarded-Proto $scheme;
+  proxy_http_version 1.1;
+  # let MinIO stream rather than buffering whole objects in nginx
+  proxy_buffering off;
+  proxy_request_buffering off;
+
+  location / { proxy_pass http://photos; }
 }
