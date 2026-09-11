@@ -64,10 +64,10 @@ services:
       MINIO_ENDPOINT: http://minio:9000
       # left empty on purpose: the upload link is signed for whatever host the
       # request arrived on, so it works from a laptop and a phone at once.
-      # Photos are uploaded straight to storage by the phone, so the link has
-      # to name a host the phone can reach over TLS. nginx serves MinIO on the
-      # same domain, port 9000, with the same certificate.
-      MINIO_PUBLIC_ENDPOINT: ${MINIO_PUBLIC_ENDPOINT:-https://${DOMAIN}:9000}
+      # Photos are uploaded straight to storage by the phone, so the link must
+      # name a host the phone can reach over TLS. nginx serves the bucket as a
+      # path on the same origin, so this is just the site's own address.
+      MINIO_PUBLIC_ENDPOINT: ${MINIO_PUBLIC_ENDPOINT:-https://${DOMAIN}}
       MINIO_ACCESS_KEY: ${MINIO_USER}
       MINIO_SECRET_KEY: ${MINIO_PASSWORD}
       MINIO_BUCKET: ${MINIO_BUCKET:-falaq-photos}
@@ -103,43 +103,20 @@ services:
       DOMAIN: ${DOMAIN:?set DOMAIN, e.g. sotuv.falaq.uz}
       APP_UPSTREAM: app:3000
       MINIO_UPSTREAM: minio:9000
+      MINIO_BUCKET: ${MINIO_BUCKET:-falaq-photos}
     depends_on:
       # the app image carries a HEALTHCHECK, so wait for it to actually serve
       app: { condition: service_healthy }
       minio: { condition: service_healthy }
-    volumes:
-      - certs:/etc/letsencrypt
-      - certbot-www:/var/www/certbot
     ports:
-      - "80:80"      # ACME challenge + redirect to https
-      - "443:443"    # the application
-      - "9000:9000"  # photo storage, same certificate
-
-  # Issues and renews the certificate. It shares the webroot with nginx, so the
-  # challenge is written where nginx is already serving it; nginx reloads on a
-  # timer and picks up a renewed certificate without a restart.
-  certbot:
-    image: certbot/certbot
-    restart: unless-stopped
-    depends_on:
-      - web
-    volumes:
-      - certs:/etc/letsencrypt
-      - certbot-www:/var/www/certbot
-    entrypoint: >
-      sh -c 'trap exit TERM;
-             while :; do
-               certbot certonly --webroot -w /var/www/certbot
-                 -d "$${DOMAIN}" --email "$${LETSENCRYPT_EMAIL}"
-                 --agree-tos --no-eff-email --keep-until-expiring --non-interactive || true;
-               sleep 12h & wait $${!};
-             done'
-    environment:
-      DOMAIN: ${DOMAIN}
-      LETSENCRYPT_EMAIL: ${LETSENCRYPT_EMAIL:?set LETSENCRYPT_EMAIL}
+      # ONE port, and nothing else. The server's existing proxy terminates TLS
+      # for sotuv.falaq.uz and forwards here. Pick anything free — 80, 443,
+      # 3000, 8000 and 8080 are all taken on this server.
+      # Bound to loopback: reach it from the server's own proxy. If that proxy
+      # is itself a container on another network, set WEB_BIND=0.0.0.0 (or put
+      # both on a shared docker network and drop the published port entirely).
+      - "${WEB_BIND:-127.0.0.1}:${WEB_PORT:-4300}:80"
 
 volumes:
   pgdata:
   miniodata:
-  certs:
-  certbot-www:

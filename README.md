@@ -12,13 +12,13 @@ on the server.
 
 ### 1. Before you start
 
-- A server with Docker Engine and the compose plugin (`docker compose version`)
-- **DNS first.** An A record for `sotuv.falaq.uz` must already point at the
-  server. Let's Encrypt verifies over port 80; without the record the first
-  start comes up on a self-signed certificate and browsers will warn.
-- Ports **80**, **443** and **9000** open. 9000 is not optional: phones upload
-  shelf photos straight to storage, and nginx serves it there under the same
-  certificate.
+- A server with Docker Engine and the compose plugin
+- **This stack does not touch 80 or 443.** Your server already runs other
+  projects behind its own proxy; that proxy keeps the certificate for
+  `sotuv.falaq.uz` and forwards to us. We publish exactly one port, on
+  loopback.
+- DNS for `sotuv.falaq.uz` pointing at the server, and a certificate in that
+  proxy — both of which you already have for your other sites.
 - About 2 GB of RAM.
 
 ### 2. Configure
@@ -27,38 +27,71 @@ on the server.
     cd falaq-sotuv-platform
     cp .env.example .env.prod
 
-Fill in every value in `.env.prod`. It is never committed. Generate the
-secrets rather than inventing them:
+Fill in every value. It is never committed. Generate the secrets:
 
     openssl rand -hex 32        # SESSION_SECRET
     openssl rand -hex 24        # DB_PASSWORD, APP_DB_PASSWORD, MINIO_PASSWORD
+
+Pick a free port — `WEB_PORT=4300` by default, since 80, 443, 3000, 8000 and
+8080 are taken on this server.
 
 Two that are easy to miss:
 
 - `APP_DB_PASSWORD` — `db/00_roles.sql` reads it to create the application's
   database role. Without it the role falls back to the development password
   that is written down in this repository.
-- `LETSENCRYPT_EMAIL` — where expiry warnings go. certbot refuses without it.
+- `DOMAIN` — the upload links and the login redirect are built from it.
 
-### 3. Start
+### 3. Point your proxy at it
+
+The stack listens on `127.0.0.1:$WEB_PORT` and speaks plain HTTP. Two headers
+must arrive intact or things break in ways that are hard to trace: `Host`
+(the photo-upload signature covers it) and `X-Forwarded-Proto` (the session
+cookie is marked Secure from it).
+
+nginx:
+
+    server {
+      listen 443 ssl;
+      server_name sotuv.falaq.uz;
+      # your existing certificate lines here
+
+      client_max_body_size 50m;      # shelf photos
+
+      location / {
+        proxy_pass http://127.0.0.1:4300;
+        proxy_set_header Host              $host;
+        proxy_set_header X-Real-IP         $remote_addr;
+        proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_http_version 1.1;
+        proxy_request_buffering off;   # photos stream through
+      }
+    }
+
+Caddy:
+
+    sotuv.falaq.uz {
+      reverse_proxy 127.0.0.1:4300
+      request_body { max_size 50MB }
+    }
+
+Photo storage needs no rule of its own. MinIO is served as a path on the same
+origin (`/falaq-photos/…`), so it inherits your TLS and there is no second
+hostname, port or certificate to arrange.
+
+### 4. Start
 
     docker compose -f docker-compose.prod.yml --env-file .env.prod up -d --build
 
 The first run creates the database volume and replays every `db/*.sql` in
-order. nginx comes up immediately on a temporary self-signed certificate so it
-can answer the Let's Encrypt challenge; certbot then issues the real one and
-nginx picks it up within twelve hours, or immediately if you reload it:
-
-    docker compose -f docker-compose.prod.yml --env-file .env.prod exec web nginx -s reload
-
-Watch it settle:
+order. Watch it settle:
 
     docker compose -f docker-compose.prod.yml --env-file .env.prod ps
-    docker compose -f docker-compose.prod.yml --env-file .env.prod logs -f certbot
 
-All five services report `healthy`. Then open **https://sotuv.falaq.uz**.
+All four services report `healthy`. Then open **https://sotuv.falaq.uz**.
 
-### 4. The first sign-in
+### 5. The first sign-in
 
 A fresh install has exactly **one** user: the direktor in `db/03_seed.sql`.
 Change the telegram id there before the first start if it should be somebody
@@ -73,7 +106,7 @@ database is already running:
       psql -U falaq_owner -d falaq \
       -c "update users set telegram_id = <id> where role = 'direktor';"
 
-### 5. Google Sheets
+### 6. Google Sheets
 
 One service account, no OAuth and no consent screen. Share the spreadsheet
 that **receives** visits with the service account as **Editor**, and the
@@ -83,7 +116,7 @@ must-list sheet as **Viewer**. A sheet that is not shared returns
 Visits push themselves as soon as they are saved; `/admin/sheets` shows the
 last successful push and any error.
 
-### 6. Updating
+### 7. Updating
 
     git pull
     docker compose -f docker-compose.prod.yml --env-file .env.prod up -d --build
@@ -96,7 +129,7 @@ runs on an empty volume, so apply them yourself, in order:
 
 Every migration is written to be safe to re-run.
 
-### 7. Backups
+### 8. Backups
 
     docker compose -f docker-compose.prod.yml --env-file .env.prod exec -T db \
       pg_dump -U falaq_owner -d falaq | gzip > falaq-$(date +%F).sql.gz
@@ -104,23 +137,24 @@ Every migration is written to be safe to re-run.
 Photos live in the `miniodata` volume; back that up too if they matter.
 Restore with `gunzip -c … | psql -U falaq_owner -d falaq` into a fresh volume.
 
-### 8. What is exposed, and what is not
+### 9. What is exposed, and what is not
 
-| port | what | why |
-|---|---|---|
-| 80 | certificate renewal, redirect to https | Let's Encrypt needs it |
-| 443 | the application | |
-| 9000 | photo storage over TLS | phones PUT straight to it |
-| 9001 | MinIO console, **loopback only** | `ssh -L 9001:127.0.0.1:9001 user@server` |
-| — | postgres | never published; only the app reaches it |
+| port | what |
+|---|---|
+| `127.0.0.1:$WEB_PORT` | the whole application, plain HTTP, for your proxy |
+| `127.0.0.1:9001` | MinIO console — `ssh -L 9001:127.0.0.1:9001 user@server` |
+| — | postgres, MinIO's API, the Next app: never published |
 
-### 9. Things that will bite you
+Nothing binds a public interface. 80, 443 and 9000 are left alone for the
+other projects on the server.
+
+### 10. Things that will bite you
 
 - **Never run `scripts/demo-*.sql` against production.** They invent visits.
   They live in `scripts/`, never in `db/`, so nothing loads them automatically.
-- **Leave `MINIO_PUBLIC_ENDPOINT` empty.** It defaults to
-  `https://sotuv.falaq.uz:9000`, which is where nginx serves storage. An upload
-  link is signed over the hostname, so a wrong value breaks photo upload with a
+- **Leave `MINIO_PUBLIC_ENDPOINT` empty.** It defaults to `https://$DOMAIN`,
+  and storage is served as a path on that same origin. An upload link is signed
+  over the hostname *and the path*, so a wrong value breaks photo upload with a
   signature error rather than a clear one.
 - **Leave `COOKIE_SECURE` empty.** The session cookie follows
   `X-Forwarded-Proto`. Hardcoding it wrong logs everybody out, silently.
