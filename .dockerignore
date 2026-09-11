@@ -8,3 +8,6 @@ tests
 scripts/demo-data.sql
 *.log
 .DS_Store
+# the separated frontend is its own image; the app has no use for its source
+# and including it made `next build` try to compile it without its deps
+web
