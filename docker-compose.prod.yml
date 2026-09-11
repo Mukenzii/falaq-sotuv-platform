@@ -1,0 +1,109 @@
+# The whole stack in containers — this is what runs on the VDS.
+#   docker compose -f docker-compose.prod.yml up -d --build
+#
+# Local development still uses docker-compose.yml (db + minio only) with
+# `npm run dev` on the host, so edits reload instantly.
+
+services:
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: falaq_owner
+      POSTGRES_PASSWORD: ${DB_PASSWORD:?set DB_PASSWORD}
+      POSTGRES_DB: falaq
+      TZ: Asia/Tashkent
+      # 00_roles.sql reads this to set the app role's password. Without it the
+      # role would be created with the development password from the repo.
+      APP_DB_PASSWORD: ${APP_DB_PASSWORD:?set APP_DB_PASSWORD}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      # only replayed on an empty volume, so it is safe to leave mounted
+      - ./db:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U falaq_owner -d falaq"]
+      interval: 10s
+      retries: 10
+    # not published: only the app talks to it, over the private network
+    expose: ["5432"]
+
+  minio:
+    image: minio/minio
+    restart: unless-stopped
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_USER:?set MINIO_USER}
+      MINIO_ROOT_PASSWORD: ${MINIO_PASSWORD:?set MINIO_PASSWORD}
+    volumes:
+      - miniodata:/data
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 10s
+      retries: 10
+    ports:
+      # 9000 must stay reachable by browsers: phones PUT photos straight to it.
+      - "9000:9000"
+      # 9001 is the admin console — keep it on loopback and reach it over SSH.
+      - "127.0.0.1:9001:9001"
+
+  app:
+    build:
+      context: .
+      args:
+        NEXT_PUBLIC_TELEGRAM_BOT_USERNAME: ${TELEGRAM_BOT_USERNAME:-}
+    restart: unless-stopped
+    depends_on:
+      db: { condition: service_healthy }
+      minio: { condition: service_healthy }
+    environment:
+      # service names resolve on the compose network
+      DATABASE_URL: postgres://falaq_app:${APP_DB_PASSWORD:?set APP_DB_PASSWORD}@db:5432/falaq
+      DATABASE_URL_OWNER: postgres://falaq_owner:${DB_PASSWORD}@db:5432/falaq
+      MINIO_ENDPOINT: http://minio:9000
+      # left empty on purpose: the upload link is signed for whatever host the
+      # request arrived on, so it works from a laptop and a phone at once.
+      MINIO_PUBLIC_ENDPOINT: ${MINIO_PUBLIC_ENDPOINT:-}
+      MINIO_ACCESS_KEY: ${MINIO_USER}
+      MINIO_SECRET_KEY: ${MINIO_PASSWORD}
+      MINIO_BUCKET: ${MINIO_BUCKET:-falaq-photos}
+      SESSION_SECRET: ${SESSION_SECRET:?set SESSION_SECRET}
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
+      TELEGRAM_BOT_USERNAME: ${TELEGRAM_BOT_USERNAME:-}
+      GOOGLE_SERVICE_ACCOUNT_EMAIL: ${GOOGLE_SERVICE_ACCOUNT_EMAIL:-}
+      GOOGLE_PRIVATE_KEY: ${GOOGLE_PRIVATE_KEY:-}
+      # full sheet URL (a bare id is still accepted)
+      SHEETS_SPREADSHEET_URL: ${SHEETS_SPREADSHEET_URL:-}
+      SHEETS_SPREADSHEET_ID: ${SHEETS_SPREADSHEET_ID:-}
+      # where the must-list is read from; empty falls back to the sheet above
+      MML_SHEET_URL: ${MML_SHEET_URL:-}
+      MML_SHEET_TAB: ${MML_SHEET_TAB:-}
+      # Leave unset behind the bundled nginx: the cookie follows
+      # X-Forwarded-Proto. Set to "true" only if TLS is terminated somewhere
+      # that does not pass that header through.
+      COOKIE_SECURE: ${COOKIE_SECURE:-}
+    # no ports: the app is now reached through web, which is the only way in.
+    # Publishing the app port as well would let a request skip the proxy and
+    # arrive with a Host the presign and redirects were not built for.
+    expose:
+      - "3000"
+
+  # The separated frontend: a static SPA built by Vite, served by nginx, which
+  # also proxies /api to the app and hands every not-yet-ported page back to
+  # it. One origin, so the session cookie works with no CORS.
+  web:
+    build:
+      context: ./web
+    restart: unless-stopped
+    environment:
+      APP_UPSTREAM: app:3000
+    depends_on:
+      # the app image carries a HEALTHCHECK, so wait for it to actually serve
+      app: { condition: service_healthy }
+    ports:
+      # 80, 3000, 8000 and 8080 are all taken on the dev machine, so this
+      # project owns 4300/4301. Change it once a domain points at the box.
+      - "${WEB_PORT:-4300}:80"
+
+volumes:
+  pgdata:
+  miniodata:

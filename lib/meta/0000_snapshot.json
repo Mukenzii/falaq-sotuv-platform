@@ -1,0 +1,984 @@
+{
+  "id": "00000000-0000-0000-0000-000000000000",
+  "prevId": "",
+  "version": "7",
+  "dialect": "postgresql",
+  "tables": {
+    "public.users": {
+      "name": "users",
+      "schema": "",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "uuid",
+          "primaryKey": true,
+          "notNull": true,
+          "default": "gen_random_uuid()"
+        },
+        "telegram_id": {
+          "name": "telegram_id",
+          "type": "bigint",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "telegram_username": {
+          "name": "telegram_username",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "full_name": {
+          "name": "full_name",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "phone": {
+          "name": "phone",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "email": {
+          "name": "email",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "role": {
+          "name": "role",
+          "type": "user_role",
+          "typeSchema": "public",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'sotuv_manager'"
+        },
+        "parent_id": {
+          "name": "parent_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "active": {
+          "name": "active",
+          "type": "boolean",
+          "primaryKey": false,
+          "notNull": true,
+          "default": true
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {
+        "users_parent_id_idx": {
+          "name": "users_parent_id_idx",
+          "columns": [
+            {
+              "expression": "parent_id",
+              "asc": true,
+              "nulls": "last",
+              "opclass": "uuid_ops",
+              "isExpression": false
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {
+        "users_parent_id_fkey": {
+          "name": "users_parent_id_fkey",
+          "tableFrom": "users",
+          "tableTo": "users",
+          "schemaTo": "public",
+          "columnsFrom": [
+            "parent_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "set null",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {
+        "users_telegram_id_key": {
+          "columns": [
+            "telegram_id"
+          ],
+          "nullsNotDistinct": false,
+          "name": "users_telegram_id_key"
+        },
+        "users_phone_key": {
+          "columns": [
+            "phone"
+          ],
+          "nullsNotDistinct": false,
+          "name": "users_phone_key"
+        },
+        "users_email_key": {
+          "columns": [
+            "email"
+          ],
+          "nullsNotDistinct": false,
+          "name": "users_email_key"
+        }
+      },
+      "checkConstraints": {
+        "no_self_parent": {
+          "name": "no_self_parent",
+          "value": "id <> parent_id"
+        }
+      },
+      "policies": {
+        "u_delete": {
+          "name": "u_delete",
+          "as": "PERMISSIVE",
+          "for": "DELETE",
+          "to": [
+            "public"
+          ],
+          "using": "(can_manage_users() AND (id <> current_user_id()))"
+        },
+        "u_update": {
+          "name": "u_update",
+          "as": "PERMISSIVE",
+          "for": "UPDATE",
+          "to": [
+            "public"
+          ]
+        },
+        "u_insert": {
+          "name": "u_insert",
+          "as": "PERMISSIVE",
+          "for": "INSERT",
+          "to": [
+            "public"
+          ]
+        },
+        "u_read": {
+          "name": "u_read",
+          "as": "PERMISSIVE",
+          "for": "SELECT",
+          "to": [
+            "public"
+          ]
+        }
+      },
+      "isRLSEnabled": true
+    },
+    "public.stores": {
+      "name": "stores",
+      "schema": "",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "bigserial",
+          "primaryKey": true,
+          "notNull": true
+        },
+        "code": {
+          "name": "code",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "name": {
+          "name": "name",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "region": {
+          "name": "region",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "channel": {
+          "name": "channel",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "letter_code": {
+          "name": "letter_code",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "owner_id": {
+          "name": "owner_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "visit_every_days": {
+          "name": "visit_every_days",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "default": 14
+        },
+        "active": {
+          "name": "active",
+          "type": "boolean",
+          "primaryKey": false,
+          "notNull": true,
+          "default": true
+        }
+      },
+      "indexes": {
+        "stores_owner_id_idx": {
+          "name": "stores_owner_id_idx",
+          "columns": [
+            {
+              "expression": "owner_id",
+              "asc": true,
+              "nulls": "last",
+              "opclass": "uuid_ops",
+              "isExpression": false
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "stores_region_idx": {
+          "name": "stores_region_idx",
+          "columns": [
+            {
+              "expression": "region",
+              "asc": true,
+              "nulls": "last",
+              "opclass": "text_ops",
+              "isExpression": false
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {
+        "stores_owner_id_fkey": {
+          "name": "stores_owner_id_fkey",
+          "tableFrom": "stores",
+          "tableTo": "users",
+          "schemaTo": "public",
+          "columnsFrom": [
+            "owner_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "set null",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {
+        "stores_code_key": {
+          "columns": [
+            "code"
+          ],
+          "nullsNotDistinct": false,
+          "name": "stores_code_key"
+        }
+      },
+      "checkConstraints": {},
+      "policies": {
+        "s_write": {
+          "name": "s_write",
+          "as": "PERMISSIVE",
+          "for": "ALL",
+          "to": [
+            "public"
+          ],
+          "withCheck": "can_manage_users()",
+          "using": "can_manage_users()"
+        },
+        "s_read": {
+          "name": "s_read",
+          "as": "PERMISSIVE",
+          "for": "SELECT",
+          "to": [
+            "public"
+          ]
+        }
+      },
+      "isRLSEnabled": true
+    },
+    "public.visits": {
+      "name": "visits",
+      "schema": "",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "uuid",
+          "primaryKey": true,
+          "notNull": true,
+          "default": "gen_random_uuid()"
+        },
+        "manager_id": {
+          "name": "manager_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "store_id": {
+          "name": "store_id",
+          "type": "bigint",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "visited_at": {
+          "name": "visited_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        },
+        "width_m": {
+          "name": "width_m",
+          "type": "numeric(5, 2)",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "height_m": {
+          "name": "height_m",
+          "type": "numeric(5, 2)",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "area_m2": {
+          "name": "area_m2",
+          "type": "numeric(7, 2)",
+          "primaryKey": false,
+          "notNull": false,
+          "generated": {
+            "as": "(width_m * height_m)",
+            "type": "stored"
+          }
+        },
+        "open_from": {
+          "name": "open_from",
+          "type": "time",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "open_to": {
+          "name": "open_to",
+          "type": "time",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "placement": {
+          "name": "placement",
+          "type": "text[]",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "facing": {
+          "name": "facing",
+          "type": "visit_facing",
+          "typeSchema": "public",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "shelf_heights": {
+          "name": "shelf_heights",
+          "type": "text[]",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "visit_result": {
+          "name": "visit_result",
+          "type": "text[]",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "took_order": {
+          "name": "took_order",
+          "type": "boolean",
+          "primaryKey": false,
+          "notNull": false,
+          "generated": {
+            "as": "('Buyurtma oldim'::text = ANY (visit_result))",
+            "type": "stored"
+          }
+        },
+        "no_order_reason": {
+          "name": "no_order_reason",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "debt_status": {
+          "name": "debt_status",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "cash_collected": {
+          "name": "cash_collected",
+          "type": "numeric(14, 2)",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "note": {
+          "name": "note",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "lat": {
+          "name": "lat",
+          "type": "numeric(9, 6)",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "lng": {
+          "name": "lng",
+          "type": "numeric(9, 6)",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {
+        "visits_manager_id_visited_at_idx": {
+          "name": "visits_manager_id_visited_at_idx",
+          "columns": [
+            {
+              "expression": "manager_id",
+              "asc": true,
+              "nulls": "last",
+              "opclass": "timestamptz_ops",
+              "isExpression": false
+            },
+            {
+              "expression": "visited_at",
+              "asc": false,
+              "nulls": "first",
+              "opclass": "uuid_ops",
+              "isExpression": false
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "visits_store_id_visited_at_idx": {
+          "name": "visits_store_id_visited_at_idx",
+          "columns": [
+            {
+              "expression": "store_id",
+              "asc": true,
+              "nulls": "last",
+              "opclass": "int8_ops",
+              "isExpression": false
+            },
+            {
+              "expression": "visited_at",
+              "asc": false,
+              "nulls": "first",
+              "opclass": "int8_ops",
+              "isExpression": false
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {
+        "visits_manager_id_fkey": {
+          "name": "visits_manager_id_fkey",
+          "tableFrom": "visits",
+          "tableTo": "users",
+          "schemaTo": "public",
+          "columnsFrom": [
+            "manager_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        },
+        "visits_store_id_fkey": {
+          "name": "visits_store_id_fkey",
+          "tableFrom": "visits",
+          "tableTo": "stores",
+          "schemaTo": "public",
+          "columnsFrom": [
+            "store_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "checkConstraints": {},
+      "policies": {
+        "v_update": {
+          "name": "v_update",
+          "as": "PERMISSIVE",
+          "for": "UPDATE",
+          "to": [
+            "public"
+          ],
+          "using": "((manager_id = current_user_id()) AND (visited_at > (now() - '24:00:00'::interval)))"
+        },
+        "v_insert": {
+          "name": "v_insert",
+          "as": "PERMISSIVE",
+          "for": "INSERT",
+          "to": [
+            "public"
+          ]
+        },
+        "v_read": {
+          "name": "v_read",
+          "as": "PERMISSIVE",
+          "for": "SELECT",
+          "to": [
+            "public"
+          ]
+        }
+      },
+      "isRLSEnabled": true
+    },
+    "public.books": {
+      "name": "books",
+      "schema": "",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "bigserial",
+          "primaryKey": true,
+          "notNull": true
+        },
+        "title": {
+          "name": "title",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "active": {
+          "name": "active",
+          "type": "boolean",
+          "primaryKey": false,
+          "notNull": true,
+          "default": true
+        }
+      },
+      "indexes": {},
+      "foreignKeys": {},
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {
+        "books_title_key": {
+          "columns": [
+            "title"
+          ],
+          "nullsNotDistinct": false,
+          "name": "books_title_key"
+        }
+      },
+      "checkConstraints": {},
+      "policies": {
+        "b_write": {
+          "name": "b_write",
+          "as": "PERMISSIVE",
+          "for": "ALL",
+          "to": [
+            "public"
+          ],
+          "withCheck": "can_manage_users()",
+          "using": "can_manage_users()"
+        },
+        "b_read": {
+          "name": "b_read",
+          "as": "PERMISSIVE",
+          "for": "SELECT",
+          "to": [
+            "public"
+          ]
+        }
+      },
+      "isRLSEnabled": true
+    },
+    "public.visit_photos": {
+      "name": "visit_photos",
+      "schema": "",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "bigserial",
+          "primaryKey": true,
+          "notNull": true
+        },
+        "visit_id": {
+          "name": "visit_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "object_key": {
+          "name": "object_key",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "content_type": {
+          "name": "content_type",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "bytes": {
+          "name": "bytes",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {},
+      "foreignKeys": {
+        "visit_photos_visit_id_fkey": {
+          "name": "visit_photos_visit_id_fkey",
+          "tableFrom": "visit_photos",
+          "tableTo": "visits",
+          "schemaTo": "public",
+          "columnsFrom": [
+            "visit_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "checkConstraints": {},
+      "policies": {
+        "vp_all": {
+          "name": "vp_all",
+          "as": "PERMISSIVE",
+          "for": "ALL",
+          "to": [
+            "public"
+          ],
+          "withCheck": "(visit_id IN ( SELECT visits.id\n   FROM visits\n  WHERE (visits.manager_id = current_user_id())))",
+          "using": "(visit_id IN ( SELECT visits.id\n   FROM visits))"
+        }
+      },
+      "isRLSEnabled": true
+    },
+    "public.visit_books": {
+      "name": "visit_books",
+      "schema": "",
+      "columns": {
+        "visit_id": {
+          "name": "visit_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "book_id": {
+          "name": "book_id",
+          "type": "bigint",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "status": {
+          "name": "status",
+          "type": "book_status",
+          "typeSchema": "public",
+          "primaryKey": false,
+          "notNull": true
+        }
+      },
+      "indexes": {},
+      "foreignKeys": {
+        "visit_books_visit_id_fkey": {
+          "name": "visit_books_visit_id_fkey",
+          "tableFrom": "visit_books",
+          "tableTo": "visits",
+          "schemaTo": "public",
+          "columnsFrom": [
+            "visit_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        },
+        "visit_books_book_id_fkey": {
+          "name": "visit_books_book_id_fkey",
+          "tableFrom": "visit_books",
+          "tableTo": "books",
+          "schemaTo": "public",
+          "columnsFrom": [
+            "book_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {
+        "visit_books_pkey": {
+          "name": "visit_books_pkey",
+          "columns": [
+            "visit_id",
+            "book_id",
+            "status"
+          ]
+        }
+      },
+      "uniqueConstraints": {},
+      "checkConstraints": {},
+      "policies": {
+        "vb_all": {
+          "name": "vb_all",
+          "as": "PERMISSIVE",
+          "for": "ALL",
+          "to": [
+            "public"
+          ],
+          "withCheck": "(visit_id IN ( SELECT visits.id\n   FROM visits\n  WHERE (visits.manager_id = current_user_id())))",
+          "using": "(visit_id IN ( SELECT visits.id\n   FROM visits))"
+        }
+      },
+      "isRLSEnabled": true
+    }
+  },
+  "enums": {
+    "public.book_status": {
+      "name": "book_status",
+      "values": [
+        "present",
+        "stale"
+      ],
+      "schema": "public"
+    },
+    "public.user_role": {
+      "name": "user_role",
+      "values": [
+        "direktor",
+        "sotuv_boshligi",
+        "hudud_rahbari",
+        "sotuv_manager"
+      ],
+      "schema": "public"
+    },
+    "public.visit_facing": {
+      "name": "visit_facing",
+      "values": [
+        "face",
+        "qisman_face",
+        "koreshok"
+      ],
+      "schema": "public"
+    }
+  },
+  "schemas": {},
+  "sequences": {},
+  "roles": {},
+  "policies": {},
+  "views": {
+    "public.v_bugungi_reja": {
+      "name": "v_bugungi_reja",
+      "schema": "public",
+      "columns": {
+        "store_id": {
+          "name": "store_id",
+          "type": "bigint",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "code": {
+          "name": "code",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "region": {
+          "name": "region",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "owner_id": {
+          "name": "owner_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "oxirgi_vizit": {
+          "name": "oxirgi_vizit",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "kun_otdi": {
+          "name": "kun_otdi",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "visit_every_days": {
+          "name": "visit_every_days",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false
+        }
+      },
+      "isExisting": false,
+      "definition": "SELECT s.id AS store_id, s.code, s.region, s.owner_id, max(v.visited_at) AS oxirgi_vizit, COALESCE(date_part('day'::text, now() - max(v.visited_at))::integer, 999) AS kun_otdi, s.visit_every_days FROM stores s LEFT JOIN visits v ON v.store_id = s.id WHERE s.active GROUP BY s.id HAVING COALESCE(date_part('day'::text, now() - max(v.visited_at))::integer, 999) >= s.visit_every_days",
+      "materialized": false
+    },
+    "public.v_manager_kunlik": {
+      "name": "v_manager_kunlik",
+      "schema": "public",
+      "columns": {
+        "manager_id": {
+          "name": "manager_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "full_name": {
+          "name": "full_name",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "kun": {
+          "name": "kun",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "vizitlar": {
+          "name": "vizitlar",
+          "type": "bigint",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "buyurtmalar": {
+          "name": "buyurtmalar",
+          "type": "bigint",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "yigilgan_pul": {
+          "name": "yigilgan_pul",
+          "type": "numeric",
+          "primaryKey": false,
+          "notNull": false
+        }
+      },
+      "isExisting": false,
+      "definition": "SELECT u.id AS manager_id, u.full_name, date_trunc('day'::text, v.visited_at) AS kun, count(v.id) AS vizitlar, count(*) FILTER (WHERE v.took_order) AS buyurtmalar, sum(v.cash_collected) AS yigilgan_pul FROM users u LEFT JOIN visits v ON v.manager_id = u.id WHERE u.role = 'sotuv_manager'::user_role GROUP BY u.id, u.full_name, (date_trunc('day'::text, v.visited_at))",
+      "materialized": false
+    },
+    "public.v_turib_qolgan": {
+      "name": "v_turib_qolgan",
+      "schema": "public",
+      "columns": {
+        "title": {
+          "name": "title",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "region": {
+          "name": "region",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "marta": {
+          "name": "marta",
+          "type": "bigint",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "oxirgi": {
+          "name": "oxirgi",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        }
+      },
+      "isExisting": false,
+      "definition": "SELECT b.title, s.region, count(*) AS marta, max(v.visited_at) AS oxirgi FROM visit_books vb JOIN visits v ON v.id = vb.visit_id JOIN books b ON b.id = vb.book_id JOIN stores s ON s.id = v.store_id WHERE vb.status = 'stale'::book_status AND v.visited_at > (now() - '90 days'::interval) GROUP BY b.title, s.region ORDER BY (count(*)) DESC",
+      "materialized": false
+    }
+  },
+  "_meta": {
+    "schemas": {},
+    "tables": {},
+    "columns": {}
+  },
+  "internal": {
+    "tables": {
+      "visits": {
+        "columns": {
+          "placement": {
+            "isArray": true,
+            "dimensions": 1,
+            "rawType": "text"
+          },
+          "shelf_heights": {
+            "isArray": true,
+            "dimensions": 1,
+            "rawType": "text"
+          },
+          "visit_result": {
+            "isArray": true,
+            "dimensions": 1,
+            "rawType": "text"
+          }
+        }
+      }
+    }
+  }
+}

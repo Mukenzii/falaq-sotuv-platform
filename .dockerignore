@@ -1,0 +1,10 @@
+node_modules
+.next
+.next-build
+.git
+.env
+.env.local
+tests
+scripts/demo-data.sql
+*.log
+.DS_Store

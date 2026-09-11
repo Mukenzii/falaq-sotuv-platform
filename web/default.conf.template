@@ -1,0 +1,52 @@
+# One origin in front of two containers.
+#
+# The SPA owns only the routes it has actually ported; everything else still
+# reaches the Next app, so the port can finish page by page without the site
+# breaking in between.
+#
+# Host is passed through untouched on purpose: the MinIO presign, the Telegram
+# login redirect and the dev-host guards all derive their origin from the
+# request's own Host header, and rewriting it here would sign uploads for the
+# wrong address.
+
+# Filled in at container start by nginx's own envsubst step, so the same image
+# can point at the compose service or at a host during testing.
+upstream app { server ${APP_UPSTREAM}; }
+
+server {
+  listen 80;
+  server_name _;
+  client_max_body_size 25m;          # photos go straight to MinIO, but be safe
+  root /usr/share/nginx/html;
+
+  # nginx builds redirects as absolute URLs from server_name and its OWN port,
+  # so behind a published port (4301:80) a 301 lost the port and sent the
+  # browser to the wrong place. Relative redirects resolve against whatever
+  # origin the browser already has.
+  absolute_redirect off;
+
+  proxy_set_header Host              $http_host;
+  proxy_set_header X-Real-IP         $remote_addr;
+  proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+  proxy_set_header X-Forwarded-Proto $scheme;
+  proxy_http_version 1.1;
+
+  # --- the API always belongs to the app container
+  location /api/ { proxy_pass http://app; }
+
+  # --- the SPA's own build output, content-hashed so it can be cached hard
+  location /assets/ {
+    try_files $uri =404;
+    expires 1y;
+    add_header Cache-Control "public, immutable";
+  }
+
+  # --- routes the SPA has taken over
+  location = /login { try_files /index.html =404; }
+  location /mml     { try_files /index.html =404; }
+  # the page was called MLRR until 2026-09-11; keep old links working
+  location /mlrr    { return 301 /mml; }
+
+  # --- everything not yet ported is still served by Next
+  location / { proxy_pass http://app; }
+}

@@ -1,0 +1,19 @@
+# secrets — every shape of them
+.env
+.env.*
+!.env.example
+
+node_modules/
+web/node_modules/
+
+.next/
+.next-build/
+web/dist/
+drizzle/
+
+*.log
+.diskcheck
+*.tmp.mjs
+
+.DS_Store
+tsconfig.tsbuildinfo
