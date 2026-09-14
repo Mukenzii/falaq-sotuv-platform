@@ -6,28 +6,30 @@ CF=/home/mukenzi/book_store_bot/Caddyfile
 C=books_store_caddy
 cd "$APP" || { echo "no $APP"; exit 1; }
 DC="docker compose -f docker-compose.prod.yml -f docker-compose.caddy.yml --env-file .env"
+TMP=$(mktemp)
+trap 'rm -f "$TMP"' EXIT
 
 echo "== 1. .env"
 [ -f .env ] || { [ -f .env.prod ] && mv .env.prod .env && echo "renamed .env.prod -> .env"; }
 [ -f .env ] && echo ok || { echo "MISSING .env"; exit 1; }
 
-echo "== 2. join Caddy's network"
+echo "== 2. join Caddy's network (only falaq-sotuv-web joins it)"
 cat > docker-compose.caddy.yml <<'YML'
 services:
-  web:
+  falaq-sotuv-web:
     networks:
       default: {}
-      caddy:
-        aliases: [falaq-sotuv-web]
+      caddy: {}
 networks:
   caddy:
     external: true
     name: book_store_bot_default
 YML
-$DC up -d 2>&1 | tail -5
+# --remove-orphans removes the old container of the service formerly called "web"
+$DC up -d --remove-orphans 2>&1 | tail -8
 $DC ps --format '{{.Service}}  {{.Status}}'
 
-echo "== 3. can Caddy reach the app? (want 200 OK)"
+echo "== 3. can Caddy reach Falaq? (want 200 OK)"
 docker exec $C wget -qS -O /dev/null http://falaq-sotuv-web/login 2>&1 | head -1
 
 echo "== 4. site block in Caddyfile"
@@ -48,30 +50,30 @@ sotuv.falaq.uz {
 CADDY
   echo "added (backup saved next to it)"
 fi
-echo "--- last 12 lines of Caddyfile:"
-tail -12 "$CF"
 
 echo "== 5. does the Caddy CONTAINER see it?"
 if docker exec $C grep -q 'sotuv.falaq.uz' /etc/caddy/Caddyfile; then echo yes
-else echo "NO -> the container sees an old copy. Run: docker restart $C   (books_store blinks ~2s)"; fi
+else echo "NO -> run: docker restart $C   (books_store blinks a few seconds), then run this script again"; exit 1; fi
 
 echo "== 6. validate + reload"
-if docker exec $C caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile >/tmp/caddy-validate.txt 2>&1; then
-  if docker exec $C caddy reload --config /etc/caddy/Caddyfile --adapter caddyfile >/tmp/caddy-reload.txt 2>&1; then
+if docker exec $C caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile >"$TMP" 2>&1; then
+  if docker exec $C caddy reload --config /etc/caddy/Caddyfile --adapter caddyfile >"$TMP" 2>&1; then
     echo reloaded
   else
-    echo "RELOAD FAILED -> run: docker restart $C"; tail -3 /tmp/caddy-reload.txt
+    echo "RELOAD FAILED -> run: docker restart $C"; tail -3 "$TMP"
   fi
 else
-  echo "VALIDATE FAILED, nothing reloaded:"; tail -8 /tmp/caddy-validate.txt
+  echo "VALIDATE FAILED, nothing reloaded:"; tail -8 "$TMP"
 fi
 
-echo "== 7. waiting for the certificate (up to 90s)"
-code=000
+echo "== 7. is it FALAQ that answers? (up to 90s)"
+title=""
 for i in $(seq 1 18); do
-  code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 https://sotuv.falaq.uz/login)
-  [ "$code" = 200 ] && break
+  title=$(curl -sL --max-time 8 https://sotuv.falaq.uz/ | tr '\n' ' ' | grep -oE '<title>[^<]*' | head -1 | sed 's/<title>//')
+  case "$title" in *Falaq*) break ;; esac
   sleep 5
 done
-if [ "$code" = 200 ]; then echo "LIVE: https://sotuv.falaq.uz"
-else echo "still not live (code $code). Caddy log:"; docker logs $C --since 10m 2>&1 | grep -iE 'sotuv|acme|challenge|error' | tail -20; fi
+case "$title" in
+  *Falaq*) echo "LIVE: https://sotuv.falaq.uz  (page title: $title)" ;;
+  *) echo "NOT OK: the site answers with title '$title'"; docker logs $C --since 10m 2>&1 | grep -iE 'sotuv|acme|error' | tail -15 ;;
+esac

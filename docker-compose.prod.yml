@@ -47,6 +47,11 @@ services:
     ports:
       # the admin console stays on loopback; reach it over an SSH tunnel
       - "127.0.0.1:9001:9001"
+    networks:
+      default:
+        # unique name: the web container may also sit on a shared proxy network
+        # where another project already has a service called "minio"
+        aliases: [falaq-sotuv-minio]
 
   app:
     build:
@@ -91,18 +96,25 @@ services:
     # arrive with a Host the presign and redirects were not built for.
     expose:
       - "3000"
+    networks:
+      default:
+        # unique name: the web container may also sit on a shared proxy network
+        # where another project already has a service called "app"
+        aliases: [falaq-sotuv-app]
 
   # The separated frontend: a static SPA built by Vite, served by nginx, which
   # also proxies /api to the app and hands every not-yet-ported page back to
   # it. One origin, so the session cookie works with no CORS.
-  web:
+  # Named falaq-sotuv-web, not "web": compose registers the service name on every
+  # network it joins, and on a shared proxy network "web" belongs to someone else.
+  falaq-sotuv-web:
     build:
       context: ./web
     restart: unless-stopped
     environment:
       DOMAIN: ${DOMAIN:?set DOMAIN, e.g. sotuv.falaq.uz}
-      APP_UPSTREAM: app:3000
-      MINIO_UPSTREAM: minio:9000
+      APP_UPSTREAM: falaq-sotuv-app:3000
+      MINIO_UPSTREAM: falaq-sotuv-minio:9000
       MINIO_BUCKET: ${MINIO_BUCKET:-falaq-photos}
     depends_on:
       # the app image carries a HEALTHCHECK, so wait for it to actually serve
