@@ -17,3 +17,6 @@ drizzle/
 
 .DS_Store
 tsconfig.tsbuildinfo
+
+# written on the server by scripts/attach-to-caddy.sh (server-specific network name)
+docker-compose.caddy.yml
