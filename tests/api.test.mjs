@@ -507,7 +507,14 @@ describe('photo upload', () => {
 
 describe('google form parity', () => {
   test('every book in the form picker exists', async () => {
-    assert.equal(psql('select count(*) from books where active'), '46')
+    // The list started as the Google Form's 46 titles and now grows from the
+    // "Sotuv uchun" sheet, so: never fewer than the form had, and the picker
+    // offers every active book.
+    const active = Number(psql('select count(*) from books where active'))
+    assert.ok(active >= 46, `only ${active} active books`)
+    const r = await req('/api/books', { as: U.sardor })
+    assert.equal(r.status, 200)
+    assert.equal(r.json.length, active)
   })
 
   test('the fourth facing answer is a valid enum value', async () => {
@@ -1528,213 +1535,139 @@ describe('pointing the export at a different spreadsheet', () => {
   })
 })
 
-describe('MML and the must-have assortment', () => {
-  let store, required, sample
+describe('pulling the must-list out of the spreadsheet', () => {
+  // runs BEFORE the fixture suites below: a real sync replaces every weight
+  test('a sotuv_manager cannot trigger it', async () => {
+    assert.equal((await req('/api/mml/sync', { as: U.sardor, method: 'POST' })).status, 403)
+  })
+
+  test('anonymous cannot either', async () => {
+    const r = await req('/api/mml/sync', { method: 'POST' })
+    assert.ok([401, 500].includes(r.status), `got ${r.status}`)
+  })
+
+  test('an admin gets a report, or a clean reason it could not run', async () => {
+    // really calls Google: it worked, credentials are missing, or the sheet said no
+    const r = await req('/api/mml/sync', { as: U.komil, method: 'POST' })
+    assert.ok([200, 502, 503].includes(r.status), `got ${r.status}`)
+    if (r.status !== 200) { assert.ok(r.json.error, 'a failure must say why'); return }
+    assert.ok(r.json.columns.length > 1)
+    assert.ok(r.json.weights > 0)
+    assert.ok(r.json.books.matched > 0)
+    for (const k of ['aliased', 'created', 'notInSheet']) assert.ok(Array.isArray(r.json.books[k]), k)
+    assert.ok(r.json.targets.every((t) => t.total >= t.named))
+  })
+
+  test('the per-store exception buttons are gone', async () => {
+    const r = await req('/api/mml/override', {
+      as: U.komil, method: 'PATCH', body: { store_id: 1, book_id: 1, required: false },
+    })
+    assert.ok([404, 405].includes(r.status), `got ${r.status}`)
+  })
+})
+
+describe('MML from weights: named titles and category shares', () => {
+  // A private column and private books, so the arithmetic can be checked by
+  // hand without depending on what the real sheet says today.
+  const COL = 'TEST MML ustun'
+  let store, saved, named, share, tiny
+
+  const lit = (v) => (v === null ? 'null' : `'${String(v).replace(/'/g, "''")}'`)
+  const book = (title, category) => psql(`with x as (
+      insert into books (title, category) values (${lit(title)}, ${lit(category)})
+      on conflict (title) do update set category = excluded.category, active = true
+      returning id) select id from x`)
+  const row = () => JSON.parse(psql(`select row_to_json(x) from
+      (select store_category, kerak, bor, yetishmaydi, mml from v_mml where store_id = ${store}) x`))
+  const clean = () => {
+    psql(`delete from visit_books where visit_id in (select id from visits where store_id = ${store});
+          delete from visits where store_id = ${store};
+          delete from store_stock where store_id = ${store};
+          delete from mml_weights where mml_column like 'TEST MML%';
+          delete from books where title like 'TEST MML %';`)
+  }
 
   before(() => {
-    // borrow a store that has a real must-list, and remember its owner
-    store = psql('select store_id from v_mml order by kerak desc limit 1')
-    if (!store) return
-    psql(`update stores set owner_id = '${U.sardor}' where id = ${store}`)
-    required = Number(psql(`select count(*) from v_store_mml where store_id = ${store} and required`))
-    sample = psql(`select string_agg(book_id::text, ',') from
-      (select book_id from v_store_mml where store_id = ${store} and required order by book_id limit 2) x`)
+    store = psql("select id from stores where active order by id offset 30 limit 1")
+    saved = JSON.parse(psql(`select row_to_json(x) from (select store_type, grade from stores where id = ${store}) x`))
+    clean()
+    named = book('TEST MML nomma', 'TESTN')
+    // three titles at 0,5 -> 1,5 -> target 2
+    share = [1, 2, 3].map((i) => book(`TEST MML ulush ${i}`, 'TESTU'))
+    // five titles at 0,2 -> 1,0 exactly -> target 1 (floating point would say 2)
+    tiny = [1, 2, 3, 4, 5].map((i) => book(`TEST MML kichik ${i}`, 'TESTK'))
+    psql(`insert into mml_weights (mml_column, book_id, weight) values
+      ('${COL}', ${named}, 1),
+      ${share.map((id) => `('${COL}', ${id}, 0.5)`).join(', ')},
+      ${tiny.map((id) => `('${COL}', ${id}, 0.2)`).join(', ')}`)
+    psql(`update stores set store_type = '${COL}', grade = null where id = ${store}`)
+  })
+  after(() => {
+    clean()
+    psql(`update stores set store_type = ${lit(saved.store_type)}, grade = ${lit(saved.grade)} where id = ${store}`)
   })
 
-  test('the must-list comes from the rule unless a store overrides it', () => {
-    // whatever mml_overrides says for a pair must win over the rule
-    const disagreeing = psql(`
-      select count(*) from v_store_mml m
-        join mml_overrides o on o.store_id = m.store_id and o.book_id = m.book_id
-       where m.required <> o.required`)
-    assert.equal(disagreeing, '0', 'an override was ignored by the view')
+  test('targets round up, in exact decimals', () => {
+    const t = Object.fromEntries(psql(`select string_agg(book_category || '=' || target, ',')
+      from v_mml_pool_target where mml_column = '${COL}'`).split(',').map((x) => x.split('=')))
+    assert.equal(t.TESTU, '2', '3 x 0,5 = 1,5 must round up to 2')
+    assert.equal(t.TESTK, '1', '5 x 0,2 = 1 exactly, not 2')
   })
 
-  test('a store with no evidence at all scores null, not zero', () => {
-    // "no evidence" now means neither a visit nor a hand-set stock value;
-    // a shop somebody filled in by hand is measured, it just was not visited
-    const bad = psql(`select count(*) from v_mml
-                       where oxirgi_vizit is null and not qolda_bor and mml is not null`)
-    assert.equal(bad, '0', 'a store with nothing behind it was given a score')
+  test('a store owes its named titles plus each share, and scores null unmeasured', () => {
+    const r = row()
+    assert.equal(r.store_category, COL)
+    assert.equal(r.kerak, 1 + 2 + 1)
+    assert.equal(r.mml, null)
   })
 
-  test('a visit that finds two required titles moves MML to match', async () => {
-    if (!store) return
+  test('a visit that finds everything scores 100%, never more', async () => {
     const r = await req('/api/visits', {
       as: U.sardor, method: 'POST',
-      body: { store_id: Number(store), present_book_ids: sample.split(',').map(Number) },
+      body: { store_id: Number(store), present_book_ids: [named, ...share, ...tiny].map(Number) },
     })
     assert.equal(r.status, 201)
-
-    const row = JSON.parse(psql(`select row_to_json(x) from
-      (select kerak, bor, yetishmaydi, mml from v_mml where store_id = ${store}) x`))
-    assert.equal(Number(row.kerak), required)
-    assert.equal(Number(row.bor), 2)
-    assert.equal(Number(row.yetishmaydi), required - 2)
-    assert.equal(Number(row.mml), Math.round(1000 * 2 / required) / 10)
+    const m = row()
+    // 1 named + min(3, 2) + min(5, 1)
+    assert.equal(m.bor, 4)
+    assert.equal(m.yetishmaydi, 0)
+    assert.equal(Number(m.mml), 100)
   })
 
-  test('the endpoint lists the whole picture for that store', async () => {
-    if (!store) return
+  test('a visit that finds one share title scores it and nothing else', async () => {
+    const r = await req('/api/visits', {
+      as: U.sardor, method: 'POST', body: { store_id: Number(store), present_book_ids: [Number(share[0])] },
+    })
+    assert.equal(r.status, 201)
+    const m = row()
+    assert.equal(m.bor, 1)
+    assert.equal(m.yetishmaydi, 3)
+    assert.equal(Number(m.mml), 25)
+  })
+
+  test('the endpoint names the titles and states each share', async () => {
     const r = await req(`/api/mml?dokon=${store}`, { as: U.sardor })
     assert.equal(r.status, 200)
-    const req_ = r.json.detail.filter((d) => d.required)
-    assert.equal(req_.length, required)
-    assert.equal(req_.filter((d) => d.bor).length, 2)
-    assert.equal(req_.filter((d) => !d.bor).length, required - 2)
-    // the not-required titles come too, so they can be put back in one click
-    assert.ok(r.json.detail.some((d) => !d.required), 'nothing offered to add')
+    const kinds = r.json.detail.reduce((a, d) => ((a[d.kind] = (a[d.kind] ?? 0) + 1), a), {})
+    assert.deepEqual(kinds, { nomma: 1, ulush: 8 })
+    const shares = Object.fromEntries(r.json.shares.map((x) => [x.book_category, [Number(x.target), Number(x.hisob)]]))
+    assert.deepEqual(shares, { TESTU: [2, 1], TESTK: [1, 0] })
   })
 
-  test('the must-list is the same list for everyone', async () => {
-    // territory is gone, so there is no longer a branch to be excluded from;
-    // every signed-in person sees every shop's must-list
-    const mine = await req('/api/mml', { as: U.sardor })
-    const komil = await req('/api/mml', { as: U.komil })
-    assert.equal(mine.status, 200)
-    assert.equal(mine.json.stores.length, komil.json.stores.length)
-    // but only an admin may edit it
-    assert.equal(mine.json.canEdit, false)
-    assert.equal(komil.json.canEdit, true)
-  })
-
-  test('the page is reachable by a manager and not by a stranger', async () => {
-    assert.equal((await req('/admin/mml', { as: U.sardor })).status, 200)
-    assert.ok([302, 307].includes((await req('/admin/mml')).status))
-  })
-})
-
-describe('editing one store\'s must-list from the chips', () => {
-  let store, book
-
-  before(() => {
-    store = psql('select store_id from v_mml order by kerak desc limit 1')
-    book = psql(`select book_id from v_store_mml where store_id = ${store} and required order by book_id limit 1`)
-  })
-  after(() => psql(`delete from mml_overrides where store_id = ${store} and book_id = ${book}`))
-
-  test('taking a title off the list shrinks what is required', async () => {
-    const was = Number(psql(`select kerak from v_mml where store_id = ${store}`))
-    const r = await req('/api/mml/override', {
-      as: U.komil, method: 'PATCH', body: { store_id: Number(store), book_id: Number(book), required: false },
+  test('marking a title on the shelf by hand counts, and clearing it does not', async () => {
+    const put = await req('/api/mml/stock', {
+      as: U.komil, method: 'PUT', body: { store_id: Number(store), book_id: Number(named), present: true },
     })
-    assert.equal(r.status, 200)
-    assert.equal(psql(`select required::text from v_store_mml where store_id = ${store} and book_id = ${book}`), 'false')
-    assert.equal(Number(psql(`select kerak from v_mml where store_id = ${store}`)), was - 1)
-  })
-
-  test('and putting it back grows it again', async () => {
-    const was = Number(psql(`select kerak from v_mml where store_id = ${store}`))
-    const r = await req('/api/mml/override', {
-      as: U.komil, method: 'PATCH', body: { store_id: Number(store), book_id: Number(book), required: true },
+    assert.equal(put.status, 200)
+    assert.equal(row().bor, 2)
+    // the visit itself is never edited
+    assert.equal(psql(`select count(*) from visit_books vb join visits v on v.id = vb.visit_id
+                        where v.store_id = ${store} and vb.book_id = ${named}`), '1')
+    const del = await req('/api/mml/stock', {
+      as: U.komil, method: 'DELETE', body: { store_id: Number(store), book_id: Number(named) },
     })
-    assert.equal(r.status, 200)
-    assert.equal(Number(psql(`select kerak from v_mml where store_id = ${store}`)), was + 1)
-  })
-
-  test('the override is what the view reports, not the rule', () => {
-    assert.equal(psql(`select is_override::text from v_store_mml where store_id = ${store} and book_id = ${book}`), 'true')
-  })
-
-  test('resetting drops the override so the rule decides again', async () => {
-    const r = await req('/api/mml/override', {
-      as: U.komil, method: 'DELETE', body: { store_id: Number(store), book_id: Number(book) },
-    })
-    assert.equal(r.status, 200)
-    assert.equal(psql(`select count(*) from mml_overrides where store_id = ${store} and book_id = ${book}`), '0')
-  })
-
-  test('a sotuv_manager cannot edit anyone\'s must-list', async () => {
-    const r = await req('/api/mml/override', {
-      as: U.sardor, method: 'PATCH', body: { store_id: Number(store), book_id: Number(book), required: false },
-    })
-    assert.equal(r.status, 403)
-    assert.equal(psql(`select count(*) from mml_overrides where store_id = ${store} and book_id = ${book}`), '0')
-  })
-
-  test('rubbish ids are refused rather than written', async () => {
-    for (const body of [{}, { store_id: 'x', book_id: 1 }, { store_id: -1, book_id: 1 }]) {
-      const r = await req('/api/mml/override', { as: U.komil, method: 'PATCH', body })
-      assert.equal(r.status, 400, JSON.stringify(body))
-    }
-  })
-})
-
-describe('saying whether a book is on the shelf, without a visit', () => {
-  let store, book
-
-  before(() => {
-    // a store with a must-list and no visit at all — the case that used to be
-    // unanswerable: every title red, nothing to click
-    store = psql(`select store_id from v_mml
-                   where oxirgi_vizit is null and kerak > 0
-                   order by kerak desc, store_id limit 1`)
-    if (!store) return
-    book = psql(`select book_id from v_mml_status where store_id = ${store} order by book_id limit 1`)
-    psql(`delete from store_stock where store_id = ${store}`)
-  })
-  after(() => { if (store) psql(`delete from store_stock where store_id = ${store}`) })
-
-  test('an unvisited store starts unmeasurable', () => {
-    if (!store) return
-    assert.equal(psql(`select coalesce(mml::text, 'null') from v_mml where store_id = ${store}`), 'null')
-  })
-
-  test('marking a title available makes the store measurable', async () => {
-    if (!store) return
-    const r = await req('/api/mml/stock', {
-      as: U.komil, method: 'PUT', body: { store_id: Number(store), book_id: Number(book), present: true },
-    })
-    assert.equal(r.status, 200)
-    const row = JSON.parse(psql(`select row_to_json(x) from
-      (select bor, mml from v_mml where store_id = ${store}) x`))
-    assert.equal(Number(row.bor), 1)
-    assert.ok(Number(row.mml) > 0, 'still unmeasured after a hand-set value')
-  })
-
-  test('the visit record itself is never touched', () => {
-    if (!store) return
-    // this is the whole reason store_stock exists rather than editing visit_books
-    assert.equal(psql(`select count(*) from visit_books vb
-                         join visits v on v.id = vb.visit_id
-                        where v.store_id = ${store}`), '0')
-  })
-
-  test('marking it unavailable again brings the count back down', async () => {
-    if (!store) return
-    const r = await req('/api/mml/stock', {
-      as: U.komil, method: 'PUT', body: { store_id: Number(store), book_id: Number(book), present: false },
-    })
-    assert.equal(r.status, 200)
-    assert.equal(psql(`select bor from v_mml where store_id = ${store}`), '0')
-  })
-
-  test('clearing it hands the store back to the last visit', async () => {
-    if (!store) return
-    const r = await req('/api/mml/stock', {
-      as: U.komil, method: 'DELETE', body: { store_id: Number(store), book_id: Number(book) },
-    })
-    assert.equal(r.status, 200)
-    assert.equal(psql(`select coalesce(mml::text, 'null') from v_mml where store_id = ${store}`), 'null')
-  })
-
-  test('a hand-set value beats what the visit found', async () => {
-    // take a visited store and contradict its visit
-    const visited = psql(`select store_id from v_mml where oxirgi_vizit is not null order by store_id limit 1`)
-    if (!visited) return
-    const found = psql(`select book_id from v_mml_status where store_id = ${visited} and bor order by book_id limit 1`)
-    if (!found) return
-    try {
-      await req('/api/mml/stock', {
-        as: U.komil, method: 'PUT', body: { store_id: Number(visited), book_id: Number(found), present: false },
-      })
-      const row = JSON.parse(psql(`select row_to_json(x) from
-        (select bor, qolda from v_mml_status where store_id = ${visited} and book_id = ${found}) x`))
-      assert.equal(row.bor, false, 'the visit overrode the hand-set value')
-      assert.equal(row.qolda, true)
-    } finally {
-      psql(`delete from store_stock where store_id = ${visited} and book_id = ${found}`)
-    }
+    assert.equal(del.status, 200)
+    assert.equal(row().bor, 1)
   })
 
   test('rubbish ids are refused', async () => {
@@ -1743,49 +1676,35 @@ describe('saying whether a book is on the shelf, without a visit', () => {
       assert.equal(r.status, 400, JSON.stringify(body))
     }
   })
-})
 
-describe('pulling the must-list back out of the spreadsheet', () => {
-  test('a sotuv_manager cannot trigger it', async () => {
-    const r = await req('/api/mml/sync', { as: U.sardor, method: 'POST' })
-    assert.equal(r.status, 403)
-  })
-
-  test('anonymous cannot either', async () => {
-    const r = await req('/api/mml/sync', { method: 'POST' })
-    assert.ok([401, 500].includes(r.status), `got ${r.status}`)  // requireUserId throws
-  })
-
-  test('an admin gets a report, or a clean reason it could not run', async () => {
-    // this one really does call Google, so all three outcomes are legitimate:
-    // it worked, credentials are missing, or the network/sheet said no
-    const r = await req('/api/mml/sync', { as: U.komil, method: 'POST' })
-    assert.ok([200, 502, 503].includes(r.status), `got ${r.status}`)
-    if (r.status !== 200) {
-      assert.ok(r.json.error, 'a failure must say why')
-      return
+  test('bookstores are measured by grade; A++ owes every title', () => {
+    const was = JSON.parse(psql(`select row_to_json(x) from (select store_type, grade from stores where id = ${store}) x`))
+    const column = (type, grade) => {
+      psql(`update stores set store_type = ${lit(type)}, grade = ${lit(grade)} where id = ${store}`)
+      return psql(`select mml_column from v_store_mml_column where store_id = ${store}`)
     }
-    assert.ok(r.json.books.matched > 0)
-    assert.ok(r.json.stores.matched > 0)
-    assert.ok(Array.isArray(r.json.books.missing), 'unmatched titles must be reported by name')
-    assert.ok(r.json.rules > 0)
+    try {
+      assert.equal(column("Kitob do'kon", 'A+'), "Kitob do'kon (A)")
+      assert.equal(column("Kitob do'kon", 'A'), "Kitob do'kon (A)")
+      assert.equal(column("Kitob do'kon", 'B'), "Kitob do'kon (B)")
+      assert.equal(column("Kitob do'kon", 'C'), "Kitob do'kon (C)")
+      assert.equal(column("Kitob do'kon", null), "Kitob do'kon (C)", 'an ungraded bookstore is measured as C')
+      assert.equal(column('Kanselyariya (Kanstovar)', 'A+'), 'Kanselyariya (Kanstovar)')
+      assert.equal(column('Supermarket', 'A++'), 'Barcha kitoblar (A++)')
+    } finally {
+      psql(`update stores set store_type = ${lit(was.store_type)}, grade = ${lit(was.grade)} where id = ${store}`)
+    }
   })
 
-  test('the sheet wins over anything toggled in the app', async () => {
-    const store = psql('select store_id from v_mml order by kerak desc, store_id limit 1')
-    const book = psql(`select book_id from v_store_mml where store_id = ${store} and required order by book_id limit 1`)
-    if (!store || !book) return
-
-    // contradict the sheet from inside the app
-    await req('/api/mml/override', {
-      as: U.komil, method: 'PATCH', body: { store_id: Number(store), book_id: Number(book), required: false },
-    })
-    assert.equal(psql(`select required::text from v_store_mml where store_id=${store} and book_id=${book}`), 'false')
-
-    const r = await req('/api/mml/sync', { as: U.komil, method: 'POST' })
-    if (r.status !== 200) return   // no credentials in this environment
-    assert.equal(psql(`select required::text from v_store_mml where store_id=${store} and book_id=${book}`), 'true',
-      'the import did not overwrite a hand-made change')
+  test('everyone sees the same list, only an admin may edit, and the page is gated', async () => {
+    const mine = await req('/api/mml', { as: U.sardor })
+    const komil = await req('/api/mml', { as: U.komil })
+    assert.equal(mine.status, 200)
+    assert.equal(mine.json.stores.length, komil.json.stores.length)
+    assert.equal(mine.json.canEdit, false)
+    assert.equal(komil.json.canEdit, true)
+    assert.equal((await req('/admin/mml', { as: U.sardor })).status, 200)
+    assert.ok([302, 307].includes((await req('/admin/mml')).status))
   })
 })
 

@@ -83,17 +83,19 @@ export function spreadsheetTarget(): { id: string; url: string; gid: string | nu
 }
 
 /**
- * Where the must-list is read FROM, which need not be the sheet the visits are
- * written TO. Falls back to the export sheet; set MML_SHEET_URL when the two
- * differ (the export moved to "Sotuv uchun", the must-list did not).
+ * Where the must-list is read FROM: the weights tab ("MML") and the book
+ * categories tab ("Kitoblar"). MML_SHEET_URL, else the store directory sheet,
+ * since all of it lives in "Sotuv uchun". Read only — Viewer is enough.
  */
-export function mmlSource(): { id: string; url: string; tab: string } | null {
+export function mmlSource(): { id: string; url: string; tab: string; booksTab: string } | null {
   const raw = process.env.MML_SHEET_URL
+    || process.env.STORES_SHEET_URL
     || process.env.SHEETS_SPREADSHEET_URL
     || process.env.SHEETS_SPREADSHEET_ID
   const id = raw ? spreadsheetIdFrom(raw) : null
-  const tab = process.env.MML_SHEET_TAB || "Do'kon MML"
-  return id ? { id, url: `https://docs.google.com/spreadsheets/d/${id}/edit`, tab } : null
+  const tab = process.env.MML_SHEET_TAB || 'MML'
+  const booksTab = process.env.MML_BOOKS_TAB || 'Kitoblar'
+  return id ? { id, url: `https://docs.google.com/spreadsheets/d/${id}/edit`, tab, booksTab } : null
 }
 
 /**

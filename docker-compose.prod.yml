@@ -88,6 +88,7 @@ services:
       # where the must-list is read from; empty falls back to the sheet above
       MML_SHEET_URL: ${MML_SHEET_URL:-}
       MML_SHEET_TAB: ${MML_SHEET_TAB:-}
+      MML_BOOKS_TAB: ${MML_BOOKS_TAB:-}
       STORES_SHEET_URL: ${STORES_SHEET_URL:-}
       STORES_SHEET_TAB: ${STORES_SHEET_TAB:-}
       STORES_GRADE_TAB: ${STORES_GRADE_TAB:-}

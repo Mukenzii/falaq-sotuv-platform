@@ -71,7 +71,7 @@ select id, store_id from ins;
 insert into visit_books (visit_id, book_id, status)
 select v.id, m.book_id, 'present'::book_status
   from demo_visit v
-  join v_store_mml m on m.store_id = v.store_id and m.required
+  join v_mml_book m on m.store_id = v.store_id   -- every title that counts for the store
  where abs(('x' || substr(md5(v.store_id::text || ':' || m.book_id::text), 1, 8))::bit(32)::int % 100)
        < 35 + abs(('x' || substr(md5('t' || v.store_id::text), 1, 8))::bit(32)::int % 66)
 on conflict do nothing;
@@ -81,7 +81,7 @@ on conflict do nothing;
 insert into visit_books (visit_id, book_id, status)
 select v.id, m.book_id, 'stale'::book_status
   from demo_visit v
-  join v_store_mml m on m.store_id = v.store_id and m.required
+  join v_mml_book m on m.store_id = v.store_id   -- every title that counts for the store
  where abs(('x' || substr(md5('s' || v.store_id::text || ':' || m.book_id::text), 1, 8))::bit(32)::int % 100) < 8
    and not exists (select 1 from visit_books vb where vb.visit_id = v.id and vb.book_id = m.book_id)
 on conflict do nothing;

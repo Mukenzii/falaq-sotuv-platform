@@ -10,9 +10,9 @@ export const maxDuration = 60
 /**
  * Pull the must-list back out of the spreadsheet.
  *
- * This replaces mml_rules and mml_overrides wholesale, so any chip somebody
- * toggled in the app is discarded — the sheet is the source of truth and the
- * button says so. That is the point: the commercial team works in the sheet.
+ * It replaces the weights wholesale and adds titles the platform lacks: the
+ * sheet is the only source of the must-list, because the commercial team works
+ * there. Hand-set shelf values (store_stock) are facts, not list, and stay.
  */
 export async function POST() {
   const me = await requireUserId()

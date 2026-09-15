@@ -12,15 +12,18 @@ type Store = {
 type Total = { kerak: string | null; bor: string | null; mml: string | null; hech_borilmagan: string }
 type Book = { book_id: number; title: string; book_category: string; kerak: string; yetishmaydi: string }
 type Sync = {
-  tab: string
-  books: { matched: number; total: number; missing: string[] }
-  stores: { matched: number; total: number; missing: string[] }
-  rules: number; overrides: number; cells: number
+  tabs: { weights: string; books: string }
+  columns: string[]
+  books: { total: number; matched: number; aliased: string[]; created: string[]; notInSheet: string[] }
+  skipped: string[]
+  weights: number
+  targets: Array<{ column: string; named: number; shares: Array<{ category: string; target: number }>; total: number }>
 }
 type Row = {
   book_id: number; title: string; book_category: string | null
-  required: boolean; is_override: boolean; bor: boolean; qolda: boolean
+  kind: 'nomma' | 'ulush'; bor: boolean; qolda: boolean
 }
+type Share = { book_category: string; target: number; bor: string; hisob: string }
 
 const pct = (v: string | null) => (v === null ? null : Number(v))
 
@@ -48,89 +51,61 @@ function Bar({ value }: { value: number }) {
 }
 
 /**
- * One store's list, in two groups.
+ * One store's list: the titles it must carry by name, then each category it
+ * owes a share of ("any 8 C titles").
  *
- * Colour says what the last visit found; the button says what to do about it.
- * Keeping those separate matters — a red chip is a fact about the shelf, not
- * an invitation to delete the title.
+ * The chip itself is the "is it on the shelf" switch. A named title that is
+ * missing is red; a share title that is missing is not, because no single one
+ * of them is required — only enough of them.
  */
-function Detail({ storeId, rows, canEdit, saving, err, onOff, onOn, onReset, onStock }: {
-  storeId: number; rows: Row[]; canEdit: boolean; saving: number | null; err: string
-  onOff: (bookId: number) => void; onOn: (bookId: number) => void; onReset: (bookId: number) => void
+function Detail({ rows, shares, canEdit, saving, err, onStock }: {
+  rows: Row[]; shares: Share[]; canEdit: boolean; saving: number | null; err: string
   onStock: (bookId: number, present: boolean) => void
 }) {
-  const required = rows.filter((r) => r.required)
-  const not = rows.filter((r) => !r.required)
-  const found = required.filter((r) => r.bor).length
+  const named = rows.filter((r) => r.kind === 'nomma')
+  const found = named.filter((r) => r.bor).length
+
+  const chip = (r: Row) => (
+    <span key={r.book_id} className={`chip ${r.kind === 'nomma' ? `on ${r.bor ? 'good' : 'bad'}` : r.bor ? 'on good' : ''}`}>
+      <button type="button" className="chipmain" disabled={!canEdit || saving === r.book_id}
+        aria-pressed={r.bor}
+        onClick={(e) => { e.stopPropagation(); onStock(r.book_id, !r.bor) }}
+        title={r.bor ? "Javonda bor — yo'q deb belgilash" : "Javonda yo'q — bor deb belgilash"}>
+        {r.bor ? '✓' : r.kind === 'nomma' ? '✕' : '·'} {r.title}
+        {r.qolda && <small title="qo'lda belgilangan, vizitdan emas"> ✋</small>}
+      </button>
+    </span>
+  )
 
   return (
     <div className="mmldetail">
       {err && <div className="alert err" style={{ marginBottom: 12 }}>{err}</div>}
-
-      <p className="lbl">
-        Kerak ({required.length}) — javonda {found} ta
-        {canEdit && (
-          <span className="hint">
-            {' '}· kitobni bosing — bor/yo&apos;q holatini o&apos;zgartiradi · <b>×</b> — ro&apos;yxatdan chiqaradi
-          </span>
-        )}
-      </p>
-      <div className="chips">
-        {required.length === 0 && <span className="hint">Bu do&apos;kon uchun ro&apos;yxat bo&apos;sh.</span>}
-        {required.map((r) => (
-          <span key={r.book_id} className={`chip on ${r.bor ? 'good' : 'bad'}`}>
-            {/* the label itself is the availability switch; x is a separate one */}
-            <button type="button" className="chipmain" disabled={!canEdit || saving === r.book_id}
-              aria-pressed={r.bor}
-              onClick={(e) => { e.stopPropagation(); onStock(r.book_id, !r.bor) }}
-              title={r.bor ? "Javonda bor — yo'q deb belgilash" : "Javonda yo'q — bor deb belgilash"}>
-              {r.bor ? '✓' : '✕'} {r.title}
-              <small style={{ opacity: 0.75 }}> · {r.book_category ?? '—'}</small>
-              {r.qolda && <small title="qo'lda belgilangan, vizitdan emas"> ✋</small>}
-              {r.is_override && <small title="ro'yxat qoidadan farq qiladi"> ✎</small>}
-            </button>
-            {canEdit && (
-              <button type="button" className="chipx" disabled={saving === r.book_id}
-                onClick={(e) => { e.stopPropagation(); onOff(r.book_id) }}
-                aria-label={`${r.title} — ro'yxatdan chiqarish`} title="Ro'yxatdan chiqarish">×</button>
-            )}
-          </span>
-        ))}
-      </div>
-
-      <p className="lbl" style={{ marginTop: 14 }}>
-        Kerak emas ({not.length})
-        {canEdit && <span className="hint"> · ro&apos;yxatga qo&apos;shish uchun bosing</span>}
-      </p>
-      <div className="chips">
-        {not.length === 0 && <span className="hint">Hammasi ro&apos;yxatda.</span>}
-        {not.map((r) => (
-          <span key={r.book_id} className="chip">
-            {r.bor && <span title="javonda bor, lekin ro'yxatda emas">● </span>}
-            {r.title}
-            <small style={{ opacity: 0.6 }}> · {r.book_category ?? '—'}</small>
-            {canEdit && (
-              <button type="button" className="chipx" disabled={saving === r.book_id}
-                onClick={(e) => { e.stopPropagation(); onOn(r.book_id) }}
-                aria-label={`${r.title} — ro'yxatga qo'shish`} title="Ro'yxatga qo'shish">+</button>
-            )}
-          </span>
-        ))}
-      </div>
-
-      {canEdit && rows.some((r) => r.is_override) && (
-        <p className="hint" style={{ marginTop: 12 }}>
-          ✎ — qoidadan farq qiladi.{' '}
-          <button type="button" className="btn btn-ghost btn-sm"
-            onClick={(e) => {
-              e.stopPropagation()
-              rows.filter((r) => r.is_override).forEach((r) => onReset(r.book_id))
-            }}>
-            Qoidaga qaytarish
-          </button>
+      {canEdit && (
+        <p className="hint" style={{ margin: '0 0 10px' }}>
+          Kitobni bosing — javonda bor/yo&apos;q holatini o&apos;zgartiradi. Ro&apos;yxatning o&apos;zi
+          Google Sheets&apos;dagi MML varag&apos;idan keladi.
         </p>
       )}
-      <span hidden>{storeId}</span>
+
+      <p className="lbl">Nomma-nom kerak ({named.length}) — javonda {found} ta</p>
+      <div className="chips">
+        {named.length === 0 && <span className="hint">Nomma-nom talab qilinadigan kitob yo&apos;q.</span>}
+        {named.map(chip)}
+      </div>
+
+      {shares.map((sh) => {
+        const pool = rows.filter((r) => r.kind === 'ulush' && r.book_category === sh.book_category)
+        const bor = Number(sh.bor)
+        return (
+          <Fragment key={sh.book_category}>
+            <p className="lbl" style={{ marginTop: 14 }}>
+              {sh.book_category} toifasidan istalgan {sh.target} ta — javonda {bor} ta
+              {bor > sh.target && <span className="hint"> · {sh.target} tasi hisoblanadi</span>}
+            </p>
+            <div className="chips">{pool.map(chip)}</div>
+          </Fragment>
+        )
+      })}
     </div>
   )
 }
@@ -138,9 +113,10 @@ function Detail({ storeId, rows, canEdit, saving, err, onOff, onOn, onReset, onS
 export default function MmlClient() {
   const [data, setData] = useState<
     { stores: Store[]; total: Total; books: Book[]; canEdit: boolean
-      source: { id: string; url: string; tab: string } | null } | null>(null)
+      source: { id: string; url: string; tab: string; booksTab: string } | null } | null>(null)
   const [open, setOpen] = useState<number | null>(null)
   const [rows, setRows] = useState<Row[] | null>(null)
+  const [shares, setShares] = useState<Share[]>([])
   const [saving, setSaving] = useState<number | null>(null)
   const [err, setErr] = useState('')
   const [syncing, setSyncing] = useState(false)
@@ -151,23 +127,24 @@ export default function MmlClient() {
   const loadAll = () => fetch('/api/mml').then((r) => r.json()).then(setData)
   useEffect(() => { loadAll() }, [])
 
+  async function loadDetail(id: number) {
+    const r = await fetch(`/api/mml?dokon=${id}`)
+    const j = r.ok ? await r.json() : { detail: [], shares: [] }
+    setRows(j.detail); setShares(j.shares)
+  }
+
   async function show(id: number) {
     if (open === id) { setOpen(null); return }
-    setOpen(id); setRows(null); setErr('')
-    const r = await fetch(`/api/mml?dokon=${id}`)
-    setRows(r.ok ? (await r.json()).detail : [])
+    setOpen(id); setRows(null); setShares([]); setErr('')
+    await loadDetail(id)
   }
 
   /**
-   * Pull the must-list back out of the spreadsheet. It replaces the rules and
-   * every override, so anything toggled here is discarded — hence the
-   * confirm. The sheet is where the commercial team works.
+   * Pull the must-list out of the spreadsheet. The weights are replaced; what
+   * someone marked as on the shelf here is kept, since that is a fact about
+   * the shop and not part of the list.
    */
   async function syncFromSheet() {
-    if (!confirm(
-      "Google Sheets'dagi ro'yxat shu yerdagini butunlay almashtiradi.\n" +
-      "Bu yerda qo'lda o'zgartirilgan belgilar yo'qoladi. Davom etamizmi?",
-    )) return
     setSyncing(true); setErr(''); setSync(null)
     try {
       const r = await fetch('/api/mml/sync', { method: 'POST' })
@@ -184,27 +161,9 @@ export default function MmlClient() {
   }
 
   /**
-   * Put a title in or out of this store's must-list. The row is updated on the
-   * spot so the chip reacts immediately, then the store totals are re-read —
-   * MML changes the moment the denominator does.
-   */
-  async function setRequired(store_id: number, book_id: number, required: boolean) {
-    setSaving(book_id); setErr('')
-    const r = await fetch('/api/mml/override', {
-      method: 'PATCH',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ store_id, book_id, required }),
-    })
-    setSaving(null)
-    if (!r.ok) { setErr((await r.json()).error ?? 'Saqlanmadi'); return }
-    setRows((rs) => rs?.map((x) => (x.book_id === book_id ? { ...x, required, is_override: true } : x)) ?? rs)
-    loadAll()
-  }
-
-  /**
    * Say whether a title is on the shelf. This writes store_stock, not the
    * visit: a visit records what a manager saw that day and must not be edited
-   * from here. MML moves immediately because the numerator changes.
+   * from here. Re-read the store afterwards, because a share caps at its target.
    */
   async function setStock(store_id: number, book_id: number, present: boolean) {
     setSaving(book_id); setErr('')
@@ -216,21 +175,7 @@ export default function MmlClient() {
     setSaving(null)
     if (!r.ok) { setErr((await r.json()).error ?? 'Saqlanmadi'); return }
     setRows((rs) => rs?.map((x) => (x.book_id === book_id ? { ...x, bor: present, qolda: true } : x)) ?? rs)
-    loadAll()
-  }
-
-  /** Forget the hand-made decision; the rule decides again. */
-  async function reset(store_id: number, book_id: number) {
-    setSaving(book_id); setErr('')
-    const r = await fetch('/api/mml/override', {
-      method: 'DELETE',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ store_id, book_id }),
-    })
-    setSaving(null)
-    if (!r.ok) { setErr((await r.json()).error ?? 'Saqlanmadi'); return }
-    const fresh = await fetch(`/api/mml?dokon=${store_id}`)
-    if (fresh.ok) setRows((await fresh.json()).detail)
+    await loadDetail(store_id)
     loadAll()
   }
 
@@ -249,15 +194,14 @@ export default function MmlClient() {
         <div style={{ flex: 1, minWidth: 240 }}>
           <h1>MML — majburiy assortiment</h1>
           <p className="sub">
-            Har bir do&apos;konda turishi kerak bo&apos;lgan kitoblarning nechtasi oxirgi vizitda
-            topilgani.
+            Har bir do&apos;konda turishi kerak bo&apos;lgan kitoblarning qanchasi javonda.
             {data.source && (
               <>
-                {' '}Ro&apos;yxat manbai:{' '}
+                {' '}Manba:{' '}
                 <a href={data.source.url} target="_blank" rel="noopener noreferrer">
-                  <b>{data.source.tab}</b>
+                  <b>{data.source.tab}</b> va <b>{data.source.booksTab}</b>
                 </a>
-                {' '}varag&apos;i.
+                {' '}varaqlari.
               </>
             )}
           </p>
@@ -271,30 +215,38 @@ export default function MmlClient() {
 
       {sync && (
         <div className="alert ok" style={{ textAlign: 'left' }}>
-          <b>{sync.tab}</b> varag&apos;idan olindi: {sync.books.matched}/{sync.books.total} kitob,
-          {' '}{sync.stores.matched}/{sync.stores.total} do&apos;kon, {sync.rules} qoida,
-          {' '}{sync.overrides} istisno.
-          {(sync.books.missing.length > 0 || sync.stores.missing.length > 0) && (
-            <>
-              <br />
-              {/* naming them is the whole value: somebody has to fix the sheet */}
-              {sync.books.missing.length > 0 && (
-                <div style={{ marginTop: 8 }}>
-                  <b>Bu kitoblar bazada yo&apos;q</b> (varaqdagi nomi boshqacha yoki kitob
-                  qo&apos;shilmagan): {sync.books.missing.join(' · ')}
-                </div>
-              )}
-              {sync.stores.missing.length > 0 && (
-                <div style={{ marginTop: 8 }}>
-                  <b>Bu do&apos;konlar bazada yo&apos;q:</b> {sync.stores.missing.join(' · ')}
-                </div>
-              )}
-            </>
+          <b>{sync.tabs.weights}</b> va <b>{sync.tabs.books}</b> varaqlaridan olindi: {sync.books.total} ta kitob
+          ({sync.books.created.length} ta yangi qo&apos;shildi), {sync.columns.length} ta ustun.
+          {/* naming them is the useful part: somebody may have to fix the sheet */}
+          {sync.books.created.length > 0 && (
+            <div style={{ marginTop: 8 }}><b>Yangi qo&apos;shilgan kitoblar:</b> {sync.books.created.join(' · ')}</div>
           )}
+          {sync.books.aliased.length > 0 && (
+            <div style={{ marginTop: 8 }}><b>Boshqacha yozilgan, mavjud kitobga bog&apos;landi:</b> {sync.books.aliased.join(' · ')}</div>
+          )}
+          {sync.skipped.length > 0 && (
+            <div style={{ marginTop: 8 }}><b>O&apos;tkazib yuborildi:</b> {sync.skipped.join(' · ')}</div>
+          )}
+          {sync.books.notInSheet.length > 0 && (
+            <div style={{ marginTop: 8 }}><b>Varaqda yo&apos;q, hisobdan chiqdi:</b> {sync.books.notInSheet.join(' · ')}</div>
+          )}
+          <div style={{ marginTop: 10 }}>
+            <b>Har bir do&apos;kon turi uchun kerakli kitoblar soni:</b>
+            <ul style={{ margin: '4px 0 0', paddingLeft: 20 }}>
+              {sync.targets.map((t) => (
+                <li key={t.column}>
+                  {t.column}: <b>{t.total}</b>
+                  {t.shares.length > 0 && (
+                    <span className="hint"> ({t.named} nomma-nom + {t.shares.map((s) => `${s.category} ${s.target}`).join(', ')})</span>
+                  )}
+                </li>
+              ))}
+            </ul>
+          </div>
         </div>
       )}
 
-      {err && <div className="alert err">{err}</div>}
+      {err && !open && <div className="alert err">{err}</div>}
 
       <div className="tiles" style={{ marginBottom: 22 }}>
         <div className="tile">
@@ -329,8 +281,8 @@ export default function MmlClient() {
         <table>
           <thead>
             <tr>
-              <th>Do&apos;kon</th><th>Toifa</th><th>Kerak</th><th>Bor</th>
-              <th>Yetishmaydi</th><th>MML</th><th>Oxirgi vizit</th>
+              <th>Do&apos;kon</th><th>Ro&apos;yxat</th><th>Kerak</th><th>Bor</th>
+              <th>Yetishmaydi</th><th>MML</th><th className="txt">Oxirgi vizit</th>
             </tr>
           </thead>
           <tbody>
@@ -340,7 +292,7 @@ export default function MmlClient() {
                 <Fragment key={s.store_id}>
                   <tr onClick={() => show(s.store_id)} style={{ cursor: 'pointer' }}>
                     <td data-label="Do'kon">{s.code}<br /><span className="hint">{s.store_name}</span></td>
-                    <td data-label="Toifa">{s.store_category ?? <span className="hint">toifasiz</span>}</td>
+                    <td data-label="Ro'yxat">{s.store_category}</td>
                     <td data-label="Kerak">{s.kerak}</td>
                     <td data-label="Bor">{s.bor}</td>
                     <td data-label="Yetishmaydi"><b>{s.yetishmaydi}</b></td>
@@ -351,17 +303,12 @@ export default function MmlClient() {
                     <td data-label="Oxirgi vizit">{s.oxirgi_vizit ?? <span className="hint">—</span>}</td>
                   </tr>
                   {open === s.store_id && (
-                    <tr key={`${s.store_id}-detail`}>
+                    <tr>
                       <td colSpan={7}>
                         {rows === null ? <span className="hint">Yuklanmoqda…</span> : (
-                          <Detail
-                            storeId={s.store_id} rows={rows} canEdit={!!data.canEdit}
-                            saving={saving} err={err}
-                            onOff={(b) => setRequired(s.store_id, b, false)}
-                            onOn={(b) => setRequired(s.store_id, b, true)}
-                            onReset={(b) => reset(s.store_id, b)}
-                            onStock={(b, present) => setStock(s.store_id, b, present)}
-                          />
+                          <Detail rows={rows} shares={shares} canEdit={!!data.canEdit}
+                                  saving={saving} err={err}
+                                  onStock={(b, present) => setStock(s.store_id, b, present)} />
                         )}
                       </td>
                     </tr>
@@ -375,7 +322,7 @@ export default function MmlClient() {
 
       <h2>Eng ko&apos;p yetishmaydigan kitoblar</h2>
       <p className="hint" style={{ marginTop: 0 }}>
-        Faqat borilgan do&apos;konlar hisobga olingan. Bu — yetkazib berish ro&apos;yxati.
+        Nomma-nom kerak bo&apos;lgan kitoblar, faqat borilgan do&apos;konlar bo&apos;yicha. Bu — yetkazib berish ro&apos;yxati.
         {filtering && ' Filtr bu ro‘yxatga qo‘llanmaydi — barcha do‘konlar bo‘yicha.'}
       </p>
       <div className="card" style={{ overflowX: 'auto' }}>
