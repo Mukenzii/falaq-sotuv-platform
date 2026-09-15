@@ -828,3 +828,116 @@ td.overdue { color: var(--red); font-weight: 600; }
 }
 .chipmain:disabled { cursor: default; }
 .chipmain:focus-visible { outline: 2px solid currentColor; outline-offset: 3px; border-radius: 3px; }
+
+/* ---------- weekly plan board ----------
+   Columns are days, cards are planned shops. Status is a word plus a glyph,
+   never colour alone. Amber is the one new colour: late, but not lost. */
+:root { --amber: #935600; --amber-wash: #fff3de; }
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme='light']) { --amber: #f0b45c; --amber-wash: #2a1c06; }
+}
+:root[data-theme='dark'] { --amber: #f0b45c; --amber-wash: #2a1c06; }
+
+/* the board wants more width than the page column; no transform, which would
+   break the fixed-position drag overlay */
+.board-wrap {
+  --bw: min(92rem, calc(100vw - 56px));
+  width: var(--bw); margin-left: calc(50% - var(--bw) / 2);
+}
+.board {
+  display: grid; grid-template-columns: repeat(7, minmax(11.5rem, 1fr)); gap: 10px;
+  overflow-x: auto; padding-bottom: 8px; scroll-snap-type: x proximity;
+}
+.kcol {
+  display: flex; flex-direction: column; gap: 8px; min-height: 15rem; padding: 10px;
+  background: var(--wash); border: 1px dashed transparent; border-radius: var(--r);
+  scroll-snap-align: start; transition: border-color .15s, background .15s;
+}
+.kcol.today { background: var(--blue-wash); }
+.kcol.over  { border-color: var(--blue); }
+.khead { display: flex; align-items: baseline; gap: 6px; padding: 0 2px 2px; font-size: 14px; }
+.khead b { font-weight: 600; }
+.kdate { color: var(--grey); font-variant-numeric: tabular-nums; }
+.kcol.past .khead b { color: var(--grey); }
+.ktoday { color: var(--blue); font-size: 13px; font-weight: 600; }
+.kcount { margin-left: auto; color: var(--grey); font-size: 13px; font-variant-numeric: tabular-nums; }
+.kbody { display: flex; flex-direction: column; gap: 8px; flex: 1; }
+.kempty { margin: 2px; color: var(--grey); font-size: 14px; }
+
+.kcard {
+  appearance: none; display: flex; flex-direction: column; align-items: stretch; gap: 1px;
+  width: 100%; padding: 9px 11px; text-align: left;
+  font: inherit; color: var(--ink); background: var(--paper);
+  border: 1px solid var(--line); border-radius: var(--r);
+  cursor: pointer; touch-action: manipulation; user-select: none; -webkit-touch-callout: none;
+  transition: border-color .15s, opacity .15s;
+}
+.kcard:hover { border-color: var(--grey); }
+.kcard.can-drag { cursor: grab; }
+.kcard.ghost { opacity: .3; }
+.kcard.lifted { cursor: grabbing; border-color: var(--blue); }
+.kcard.h-borilmadi { border-color: color-mix(in srgb, var(--red) 40%, var(--line)); }
+.kcard.h-kechikmoqda { border-color: color-mix(in srgb, var(--amber) 40%, var(--line)); }
+.kcode { font-size: 14.5px; font-weight: 600; line-height: 1.3; overflow-wrap: anywhere; }
+.kname { font-size: 13px; color: var(--grey); line-height: 1.35; }
+.kwho  { font-size: 13px; line-height: 1.35; margin-top: 3px; }
+
+.kstatus {
+  display: inline-flex; align-items: center; gap: 5px;
+  font-size: 12.5px; font-weight: 600; white-space: nowrap;
+}
+.kstatus i { font-style: normal; width: 1em; text-align: center; }
+.kwhen { font-weight: 400; }
+.h-rejada .kstatus, .kstatus.h-rejada { color: var(--grey); }
+.h-bugun .kstatus, .kstatus.h-bugun { color: var(--blue); }
+.h-kechikmoqda .kstatus, .kstatus.h-kechikmoqda,
+.h-kechikdi .kstatus, .kstatus.h-kechikdi { color: var(--amber); }
+.h-bajarildi .kstatus, .kstatus.h-bajarildi { color: var(--green); }
+.h-borilmadi .kstatus, .kstatus.h-borilmadi { color: var(--red); }
+
+.klegend { display: flex; flex-wrap: wrap; gap: 6px 16px; margin: 0 0 14px; }
+
+.daychips .chip {
+  flex-direction: column; align-items: center; justify-content: center;
+  min-width: 56px; padding: 6px 10px; line-height: 1.2;
+}
+.daychips .chip b { font-weight: 600; font-size: 15px; }
+.daychips .chip small { font-size: 12px; opacity: .75; font-variant-numeric: tabular-nums; }
+.daychips .chip.istoday:not(.on) { border-color: var(--blue); }
+
+dialog.plansheet {
+  width: min(30rem, calc(100vw - 32px)); padding: 22px;
+  color: var(--ink); background: var(--paper);
+  border: 1px solid var(--line); border-radius: var(--r);
+}
+dialog.plansheet::backdrop { background: rgb(0 0 0 / .5); }
+.plansheet h3 { margin: 6px 0 2px; font-size: 21px; letter-spacing: -.015em; line-height: 1.25; }
+.sheetfacts { display: grid; grid-template-columns: auto 1fr; gap: 4px 14px; margin: 16px 0 0; font-size: 15px; }
+.sheetfacts dt { color: var(--grey); }
+.sheetfacts dd { margin: 0; }
+.sheetacts { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 22px; }
+
+@media (max-width: 640px) {
+  .board-wrap { --bw: 100%; }
+  .board { grid-template-columns: repeat(7, 80vw); scroll-snap-type: x mandatory; }
+  /* a bottom sheet on the phone */
+  dialog.plansheet {
+    width: 100%; max-width: 100%; margin: auto 0 0;
+    border-radius: 12px 12px 0 0; border-bottom: 0;
+    padding-bottom: calc(22px + env(safe-area-inset-bottom));
+  }
+  .sheetacts .btn { min-height: 44px; }
+}
+@media (prefers-reduced-motion: reduce) { .kcol, .kcard { transition: none; } }
+
+/* th:nth-child(n+5) right-aligns for numeric columns; text columns past the
+   fourth opt out, so the header sits over its cells */
+th.txt { text-align: left; }
+
+/* territory / type filters: inside a card they sit between form rows */
+.card .storefilters { margin: 2px 0 14px; }
+.storefilters + .card, .storefilters + .tablewrap { margin-top: 10px; }
+
+/* the service-account address to share the sheet with, plus a copy button */
+.sharecopy { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin: 6px 0; }
+.sharecopy input[type=text] { flex: 1 1 18rem; min-width: 0; padding: 7px 9px; font-size: 14px; }

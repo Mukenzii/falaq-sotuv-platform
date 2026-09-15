@@ -23,6 +23,8 @@ export async function GET() {
     configured: isConfigured(),
     problem: sheetsProblem(),
     sheet: spreadsheetTarget(),   // so the page can say which spreadsheet, and link to it
+    // not a secret: it is the address the sheet has to be shared with
+    account: process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL ?? null,
     ...info,
     ...(await sheetsStatus()),
   })

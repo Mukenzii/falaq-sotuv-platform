@@ -1,5 +1,4 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { useNavigate } from 'react-router-dom'
 
 type Phase = 'idle' | 'starting' | 'waiting' | 'error'
 
@@ -15,7 +14,6 @@ const clearClientCache = () => {
 }
 
 export default function Login() {
-  const nav = useNavigate()
   const [phase, setPhase] = useState<Phase>('idle')
   const [link, setLink] = useState('')
   const [err, setErr] = useState('')
@@ -39,7 +37,8 @@ export default function Login() {
       const j = await r.json()
       if (j.state === 'ok') {
         clearClientCache()          // a different person may be signing in here
-        nav('/mml', { replace: true })
+        // home is the Next app, so this has to be a real page load
+        location.replace('/')
         return true
       }
       if (j.state === 'pending') return false
@@ -49,7 +48,7 @@ export default function Login() {
     } catch {
       return false                  // a dropped poll on a phone network is not a failure
     }
-  }, [nav])
+  }, [])
 
   const loop = useCallback(async () => {
     stop()

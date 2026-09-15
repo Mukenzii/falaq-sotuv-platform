@@ -1,101 +1,123 @@
 import { sql } from 'drizzle-orm'
 import { asSystem, type Tx } from '@/lib/db'
-import { writeTab, isConfigured, SheetsNotConfigured } from '@/lib/sheets'
+import { writeVisitsSheet, isConfigured, SheetsNotConfigured } from '@/lib/sheets'
 import { questionColumns } from '@/lib/form/export'
 import { answerText, type AnswerValue } from '@/lib/form/answers'
-import type { FormDoc } from '@/lib/form/types'
+import type { CoreKey, FormDoc, QuestionBlock } from '@/lib/form/types'
 
 /**
- * Pushing the whole spreadsheet, as the system, on every change.
+ * Pushing every visit to the spreadsheet, as the system, on every change.
  *
- * Two decisions worth not re-litigating:
+ * The sheet reads like a Google Forms response sheet: one row per visit, one
+ * column per form question in the order the form shows them, headed with the
+ * question's own title. The 16 original questions live in typed columns on
+ * `visits`, the admin-added ones in visit_answers; both become ordinary
+ * columns here, followed by any removed question that still has answers.
  *
- * 1. It runs as asSystem, not as the person who triggered it. The spreadsheet
- *    is the company's record, and the trigger is now a manager saving a visit —
- *    an RLS-scoped rewrite would have that manager replace everyone else's rows
- *    with their own dozen. Whoever saves, the sheet gets everything.
+ * Decisions worth not re-litigating:
  *
- * 2. It rewrites all three tabs rather than appending the one new visit. At a
- *    few visits a day that costs nothing, and it buys exactness: no duplicate
- *    row if a retry overlaps, no drift when an admin adds a form question and
- *    the columns move, and bugungi_reja stays true — the plan changes the
- *    moment a visit lands, which an append would never capture.
+ * 1. It runs as asSystem, not as the person who triggered it. The trigger is a
+ *    manager saving a visit — an RLS-scoped rewrite would replace everyone
+ *    else's rows with their own. Whoever saves, the sheet gets everything.
+ *
+ * 2. It rewrites the tab rather than appending the one new visit. At a few
+ *    visits a day that costs nothing and buys exactness: no duplicate row if a
+ *    retry overlaps, and no drift when an admin adds a question and columns move.
  */
 
-function cell(x: unknown): string | number {
-  if (x === null || x === undefined) return ''
-  if (typeof x === 'boolean') return x ? 'ha' : "yo'q"
-  if (typeof x === 'number') return x
-  return String(x)
+type Cell = string | number
+
+/** First header cell. The writer only ever overwrites a tab that starts with it. */
+export const VISITS_MARK = 'Vizit vaqti'
+
+const list = (a: unknown) => (Array.isArray(a) ? a.join('; ') : '')
+const num = (x: unknown): Cell => (x === null || x === undefined || x === '' ? '' : Number(x))
+
+function coreCell(key: CoreKey, v: any, base: string): Cell {
+  switch (key) {
+    case 'store_id':        return v.dokon
+    case 'width_m':         return num(v.width_m)
+    case 'height_m':        return num(v.height_m)
+    case 'open_from':       return v.open_from ?? ''
+    case 'open_to':         return v.open_to ?? ''
+    case 'placement':       return list(v.placement)
+    case 'facing':          return v.facing ?? ''
+    case 'shelf_heights':   return list(v.shelf_heights)
+    // links open through the app, which checks the viewer may see the visit
+    case 'photos':          return (v.photos ?? [])
+      .map((k: string) => (base ? `${base}/api/uploads/view?key=${encodeURIComponent(k)}` : k)).join('\n')
+    case 'present_books':   return list(v.present_books)
+    case 'stale_books':     return list(v.stale_books)
+    case 'visit_result':    return list(v.visit_result)
+    case 'no_order_reason': return v.no_order_reason ?? ''
+    case 'debt_status':     return v.debt_status ?? ''
+    case 'cash_collected':  return num(v.cash_collected)
+    case 'note':            return v.note ?? ''
+  }
 }
 
-function toRows(rows: Record<string, unknown>[], fallback: string[]): (string | number)[][] {
-  if (!rows.length) return [fallback]
-  return [Object.keys(rows[0]), ...rows.map((r) => Object.values(r).map(cell))]
-}
+/** The whole visits tab, header first. Exported so it can be checked without Google. */
+export async function buildVisitSheet(db: Tx): Promise<Cell[][]> {
+  const base = (process.env.APP_PUBLIC_URL ?? '').trim().replace(/\/+$/, '')
 
-async function collect(db: Tx) {
-  const v = await db.execute(sql`
-    select v.id, to_char(v.visited_at, 'YYYY-MM-DD HH24:MI') sana, u.full_name manager,
-           s.code dokon, s.region hudud, s.channel kanal,
-           v.width_m eni, v.height_m boyi, v.area_m2 maydon,
-           v.facing, array_to_string(v.placement, ' | ') joylashuv,
-           array_to_string(v.shelf_heights, ' | ') javon,
-           array_to_string(v.visit_result, ' | ') natija,
-           v.took_order buyurtma, v.no_order_reason sabab,
-           v.debt_status qarz, v.cash_collected pul,
-           (select count(*) from visit_photos p where p.visit_id = v.id) rasmlar,
-           v.note izoh
-      from visits v
-      join users u on u.id = v.manager_id
-      join stores s on s.id = v.store_id
-     order by v.visited_at desc`)
-
-  const b = await db.execute(sql`
-    select to_char(v.visited_at, 'YYYY-MM-DD') sana, u.full_name manager,
-           s.code dokon, bk.title kitob, vb.status holat
-      from visit_books vb
-      join visits v on v.id = vb.visit_id
-      join users u on u.id = v.manager_id
-      join stores s on s.id = v.store_id
-      join books bk on bk.id = vb.book_id
-     order by v.visited_at desc, bk.title`)
-
-  // one column per admin-created question, taken from the form document itself
-  // so the export follows the form without a code change
   const versions = (await db.execute(sql`
     select version, status, doc from form_versions order by version desc`)).rows as
     Array<{ version: number; status: string; doc: FormDoc }>
+
+  const visits = (await db.execute(sql`
+    select v.id, to_char(v.visited_at, 'YYYY-MM-DD HH24:MI') vaqt, u.full_name manager,
+           s.code dokon, v.width_m, v.height_m,
+           to_char(v.open_from, 'HH24:MI') open_from, to_char(v.open_to, 'HH24:MI') open_to,
+           v.placement, v.facing::text facing, v.shelf_heights, v.visit_result,
+           v.no_order_reason, v.debt_status, v.cash_collected, v.note, v.lat, v.lng,
+           (select array_agg(b.title order by b.title) from visit_books vb join books b on b.id = vb.book_id
+             where vb.visit_id = v.id and vb.status = 'present') present_books,
+           (select array_agg(b.title order by b.title) from visit_books vb join books b on b.id = vb.book_id
+             where vb.visit_id = v.id and vb.status = 'stale') stale_books,
+           (select array_agg(p.object_key order by p.created_at) from visit_photos p
+             where p.visit_id = v.id) photos
+      from visits v
+      join users u on u.id = v.manager_id
+      join stores s on s.id = v.store_id
+     -- oldest first, like a Forms response sheet: a new visit lands at the bottom
+     order by v.visited_at, v.id`)).rows as any[]
 
   const answers = (await db.execute(sql`
     select va.visit_id, va.block_key, va.value
       from visit_answers va join visits v on v.id = va.visit_id`)).rows as
     Array<{ visit_id: string; block_key: string; value: AnswerValue }>
 
-  const p = await db.execute(sql`
-    select code dokon, region hudud, kun_otdi,
-           to_char(oxirgi_vizit, 'YYYY-MM-DD') oxirgi_vizit
-      from v_bugungi_reja order by kun_otdi desc`)
+  // every question of the published form, core and custom, in form order
+  const published = versions.find((v) => v.status === 'published')
+  const inForm: QuestionBlock[] = []
+  for (const sec of published?.doc?.sections ?? []) {
+    for (const b of sec.blocks ?? []) if (b.kind === 'question') inForm.push(b)
+  }
+  const seen = new Set(inForm.map((q) => q.id))
+  // removed questions that still hold answers, already titled "(arxiv)"
+  const archived = questionColumns(versions, answers.map((a) => a.block_key)).filter((q) => !seen.has(q.id))
 
-  const custom = questionColumns(versions, answers.map((a) => a.block_key))
   const byVisit = new Map<string, Map<string, AnswerValue>>()
   for (const a of answers) {
     if (!byVisit.has(a.visit_id)) byVisit.set(a.visit_id, new Map())
     byVisit.get(a.visit_id)!.set(a.block_key, a.value)
   }
-  const visitRows = (v.rows as Record<string, unknown>[]).map((row) => {
-    const mine = byVisit.get(row.id as string)
-    const extra: Record<string, string> = {}
-    for (const q of custom) extra[q.title] = answerText(q, mine?.get(q.id) ?? null)
-    const { id: _drop, ...rest } = row
-    return { ...rest, ...extra }
-  })
 
-  return {
-    vizitlar: toRows(visitRows, ['sana']),
-    vizit_kitoblar: toRows(b.rows as Record<string, unknown>[], ['sana']),
-    bugungi_reja: toRows(p.rows as Record<string, unknown>[], ['dokon']),
-  }
+  const header: Cell[] = [VISITS_MARK, 'Menejer', ...inForm.map((q) => q.title),
+    ...archived.map((q) => q.title), 'GPS', 'Vizit havolasi']
+  const rows = visits.map((v) => {
+    const mine = byVisit.get(v.id)
+    const answer = (q: QuestionBlock): Cell =>
+      q.coreKey ? coreCell(q.coreKey, v, base) : answerText(q, mine?.get(q.id) ?? null)
+    return [
+      v.vaqt, v.manager,
+      ...inForm.map(answer),
+      ...archived.map(answer),
+      v.lat !== null && v.lng !== null ? `${Number(v.lat)}, ${Number(v.lng)}` : '',
+      base ? `${base}/vizit/${v.id}` : v.id,
+    ]
+  })
+  return [header, ...rows]
 }
 
 /** Say the spreadsheet is behind. Cheap, and safe to call from a request. */
@@ -133,9 +155,9 @@ export async function runSheetsSync(): Promise<SyncResult> {
   if (got === 'busy') return { ok: false, reason: 'busy' }
 
   try {
-    const tabs = await asSystem(collect)
-    const wrote: Record<string, number> = {}
-    for (const [title, rows] of Object.entries(tabs)) wrote[title] = await writeTab(title, rows)
+    const sheet = await asSystem(buildVisitSheet)
+    const out = await writeVisitsSheet(sheet, VISITS_MARK)
+    const wrote: Record<string, number> = { vizitlar: out.rows }
 
     await asSystem((db) => db.execute(sql`
       update sheets_sync

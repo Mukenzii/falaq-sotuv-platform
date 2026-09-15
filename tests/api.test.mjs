@@ -1510,11 +1510,19 @@ describe('pointing the export at a different spreadsheet', () => {
     }
   })
 
+  test('a link can name the tab: #gid or ?gid, and no gid means none', async () => {
+    const { gidFrom } = await import('../lib/sheets.ts')
+    assert.equal(gidFrom(`https://docs.google.com/spreadsheets/d/${ID}/edit#gid=980051084`), '980051084')
+    assert.equal(gidFrom(`https://docs.google.com/spreadsheets/d/${ID}/edit?gid=0#gid=0`), '0')
+    assert.equal(gidFrom(`https://docs.google.com/spreadsheets/d/${ID}/edit?usp=sharing`), null)
+    assert.equal(gidFrom(ID), null)
+  })
+
   test('the status endpoint names the sheet it will write to', async () => {
     const r = await req('/api/sync/sheets', { as: U.komil })
     assert.equal(r.status, 200)
     if (r.json.configured) {
-      assert.match(r.json.sheet.url, /^https:\/\/docs\.google\.com\/spreadsheets\/d\/[\w-]+\/edit$/)
+      assert.match(r.json.sheet.url, /^https:\/\/docs\.google\.com\/spreadsheets\/d\/[\w-]+\/edit(#gid=\d+)?$/)
       assert.equal(r.json.problem, null)
     }
   })
@@ -1782,58 +1790,77 @@ describe('pulling the must-list back out of the spreadsheet', () => {
 })
 
 describe('the weekly plan', () => {
-  let week, store, other
+  let week, past, past2, today, sunday, store, other, third, fourth
 
-  const clean = () => psql(`delete from week_plans where week_start = '${week}';
+  const clean = () => psql(`delete from week_plans
+      where week_start in ('${week}', '${past}', '${past2}')
+        and store_id in (${store}, ${other}, ${third}, ${fourth});
     delete from visit_books where visit_id in (
-      select id from visits where store_id in (${store}, ${other}));
-    delete from visits where store_id in (${store}, ${other})`)
+      select id from visits where store_id in (${store}, ${other}, ${third}, ${fourth}));
+    delete from visits where store_id in (${store}, ${other}, ${third}, ${fourth})`)
+
+  const plan = (body, as = U.komil) => req('/api/plan', { as, method: 'POST', body })
+  const patch = (body, as = U.komil) => req('/api/plan', { as, method: 'PATCH', body })
+  const rowOf = (json, s) => json.rows.find((x) => String(x.store_id) === String(s))
+  const day = (w, n) => psql(`select ('${w}'::date + ${n})::text`)
+  const visitOn = (who, s, d) => psql(`with x as (
+      insert into visits (manager_id, store_id, visited_at) values ('${who}', ${s}, '${d} 12:00')
+      returning id) select id from x`)
 
   before(() => {
-    week = psql("select (date_trunc('week', now()))::date::text")
+    week = psql('select week_of()::text')
+    past = psql('select (week_of() - 14)::text')
+    past2 = psql('select (week_of() - 21)::text')
+    today = psql('select current_date::text')
+    sunday = psql('select (week_of() + 6)::text')
     // deliberately NOT the first stores: earlier suites visit those, and a
     // leftover visit would make a planned shop look done before anyone went
-    const ids = psql("select string_agg(id::text, ',' order by id) from (select id from stores where active order by id offset 7 limit 2) x").split(',')
-    ;[store, other] = ids
+    const ids = psql("select string_agg(id::text, ',' order by id) from (select id from stores where active order by id offset 7 limit 4) x").split(',')
+    ;[store, other, third, fourth] = ids
     clean()
   })
   after(clean)
 
-  test('an admin gives shops to a person for the week', async () => {
-    const r = await req('/api/plan', {
-      as: U.komil, method: 'POST',
-      body: { hafta: week, user_id: U.sardor, store_ids: [Number(store), Number(other)] },
-    })
+  test('an admin gives shops to a person on a day', async () => {
+    const r = await plan({ sana: today, user_id: U.sardor, store_ids: [Number(store), Number(other)] })
     assert.equal(r.status, 200)
     assert.equal(r.json.assigned, 2)
-    assert.equal(psql(`select count(*) from week_plans where week_start = '${week}'`), '2')
+    assert.equal(r.json.week, week)
+    assert.equal(psql(`select count(*) from week_plans where week_start = '${week}' and visit_date = '${today}'`), '2')
+  })
+
+  test('a day has to be chosen, and has to be a real date', async () => {
+    assert.equal((await plan({ user_id: U.sardor, store_ids: [Number(store)] })).status, 400)
+    assert.equal((await plan({ sana: '2026-02-30', user_id: U.sardor, store_ids: [Number(store)] })).status, 400)
   })
 
   test('a manager cannot plan anybody\'s week', async () => {
-    const r = await req('/api/plan', {
-      as: U.sardor, method: 'POST',
-      body: { hafta: week, user_id: U.sardor, store_ids: [Number(store)] },
-    })
+    const r = await plan({ sana: today, user_id: U.sardor, store_ids: [Number(store)] }, U.sardor)
     assert.equal(r.status, 403)
   })
 
-  test('until they go, the shops count as missed', async () => {
+  test('a shop planned for today is "bugun" until they go', async () => {
     const r = await req(`/api/plan?hafta=${week}`, { as: U.komil })
     assert.equal(r.status, 200)
+    assert.equal(r.json.today, today)
+    assert.equal(rowOf(r.json, store).holat, 'bugun')
+    assert.equal(rowOf(r.json, store).visit_date, today)
     const s = r.json.summary.find((x) => x.user_id === U.sardor)
     assert.equal(Number(s.reja), 2)
     assert.equal(Number(s.bajarildi), 0)
     assert.equal(Number(s.qoldi), 2)
   })
 
-  test('their own visit completes the task', async () => {
+  test('their own visit on the day completes the task', async () => {
     assert.equal((await req('/api/visits', {
       as: U.sardor, method: 'POST', body: { store_id: Number(store) },
     })).status, 201)
 
     const r = await req(`/api/plan?hafta=${week}`, { as: U.komil })
+    assert.equal(rowOf(r.json, store).holat, 'bajarildi')
     const s = r.json.summary.find((x) => x.user_id === U.sardor)
     assert.equal(Number(s.bajarildi), 1)
+    assert.equal(Number(s.vaqtida), 1)
     assert.equal(Number(s.qoldi), 1)
     assert.equal(Number(s.foiz), 50)
   })
@@ -1844,7 +1871,7 @@ describe('the weekly plan', () => {
     })).status, 201)
 
     const r = await req(`/api/plan?hafta=${week}`, { as: U.komil })
-    const row = r.json.rows.find((x) => String(x.store_id) === String(other))
+    const row = rowOf(r.json, other)
     assert.equal(row.bajarildi, false, 'another person\'s visit closed the task')
     assert.ok(row.boshqa_vizit, 'the cover visit was not reported')
   })
@@ -1858,13 +1885,117 @@ describe('the weekly plan', () => {
     assert.equal(asOwner, '1')
   })
 
-  test('re-assigning a shop moves it rather than duplicating the task', async () => {
-    await req('/api/plan', {
-      as: U.komil, method: 'POST',
-      body: { hafta: week, user_id: U.otabek, store_ids: [Number(store)] },
+  test('an admin moves a planned shop to another day of the same week', async () => {
+    const r = await patch({ store_id: Number(other), sana: today, yangi_sana: sunday })
+    assert.equal(r.status, 200)
+    assert.equal(psql(`select visit_date::text from week_plans where week_start='${week}' and store_id=${other}`), sunday)
+    const g = await req(`/api/plan?hafta=${week}`, { as: U.komil })
+    assert.ok(['rejada', 'bugun'].includes(rowOf(g.json, other).holat))
+  })
+
+  test('a move cannot leave the week — not through the API, not in the table', async () => {
+    assert.equal((await patch({ store_id: Number(other), sana: sunday, yangi_sana: day(week, 7) })).status, 400)
+    assert.throws(() => psql(`update week_plans set visit_date = week_start + 7
+                               where week_start='${week}' and store_id=${other}`))
+  })
+
+  test('an admin hands a planned shop to another person', async () => {
+    const r = await patch({ store_id: Number(other), sana: sunday, user_id: U.otabek })
+    assert.equal(r.status, 200)
+    assert.equal(psql(`select user_id::text from week_plans where week_start='${week}' and store_id=${other}`), U.otabek)
+    // and the cover visit otabek already made now counts as theirs
+    const g = await req(`/api/plan?hafta=${week}`, { as: U.komil })
+    assert.equal(rowOf(g.json, other).bajarildi, true)
+  })
+
+  test('moving needs something to move, a known shop, and an admin', async () => {
+    assert.equal((await patch({ store_id: Number(other), sana: sunday })).status, 400)
+    assert.equal((await patch({ store_id: Number(third), sana: today, yangi_sana: sunday })).status, 404)
+    assert.equal((await patch({ store_id: Number(other), sana: sunday, yangi_sana: today }, U.sardor)).status, 403)
+  })
+
+  test('in a finished week: on the day, early, late, and not at all', async () => {
+    const wed = day(past, 2)
+    for (const s of [store, other, third, fourth]) {
+      assert.equal((await plan({ sana: wed, user_id: U.sardor, store_ids: [Number(s)] })).status, 200)
+    }
+    visitOn(U.sardor, store, wed)            // on the day
+    visitOn(U.sardor, fourth, day(past, 0))  // Monday, before the planned day
+    visitOn(U.sardor, other, day(past, 4))   // Friday, late
+    // third: nobody went
+
+    const r = await req(`/api/plan?hafta=${past}`, { as: U.komil })
+    assert.equal(rowOf(r.json, store).holat, 'bajarildi')
+    assert.equal(rowOf(r.json, fourth).holat, 'bajarildi')
+    assert.equal(rowOf(r.json, other).holat, 'kechikdi')
+    assert.equal(rowOf(r.json, third).holat, 'borilmadi')
+
+    const s = r.json.summary.find((x) => x.user_id === U.sardor)
+    assert.deepEqual(
+      [s.reja, s.bajarildi, s.vaqtida, s.kechikdi, s.qoldi, s.borilmadi].map(Number),
+      [4, 3, 2, 1, 1, 1])
+    assert.equal(Number(s.foiz), 75)
+  })
+
+  test('a planned day that has passed this week is "kechikmoqda", not yet missed',
+    { skip: psql('select extract(isodow from current_date)') === '1' && 'today is Monday' },
+    async () => {
+      assert.equal((await plan({ sana: week, user_id: U.sardor, store_ids: [Number(third)] })).status, 200)
+      const r = await req(`/api/plan?hafta=${week}`, { as: U.komil })
+      assert.equal(rowOf(r.json, third).holat, 'kechikmoqda')
     })
-    assert.equal(psql(`select count(*) from week_plans where week_start='${week}' and store_id=${store}`), '1')
-    assert.equal(psql(`select user_id::text from week_plans where week_start='${week}' and store_id=${store}`), U.otabek)
+
+  test('several days at once: every shop on every day, all in one week', async () => {
+    const [a, b] = [day(week, 1), day(week, 4)]
+    const r = await plan({ sanalar: [a, b], user_id: U.sardor, store_ids: [Number(fourth), Number(third)] })
+    assert.equal(r.status, 200)
+    assert.equal(r.json.assigned, 4)
+    assert.equal(psql(`select string_agg(visit_date::text, ',' order by visit_date) from week_plans
+                        where week_start='${week}' and store_id=${fourth}`), `${a},${b}`)
+    assert.equal((await plan({ sanalar: [a, day(week, 7)], user_id: U.sardor, store_ids: [Number(fourth)] })).status, 400,
+      'days from two different weeks were accepted')
+    assert.equal((await plan({ sanalar: [], user_id: U.sardor, store_ids: [Number(fourth)] })).status, 400)
+  })
+
+  test('the same shop on the same day is one task; planning it again hands it over', async () => {
+    const d = day(week, 1)
+    const r = await plan({ sanalar: [d], user_id: U.otabek, store_ids: [Number(fourth)] })
+    assert.equal(r.status, 200)
+    assert.equal(psql(`select count(*) from week_plans where store_id=${fourth} and visit_date='${d}'`), '1')
+    assert.equal(psql(`select user_id::text from week_plans where store_id=${fourth} and visit_date='${d}'`), U.otabek)
+    assert.equal(psql(`select count(*) from week_plans where week_start='${week}' and store_id=${fourth}`), '2',
+      'the other day of that shop was touched')
+  })
+
+  test('a day cannot be moved onto a day that shop already has', async () => {
+    const r = await patch({ store_id: Number(fourth), sana: day(week, 1), yangi_sana: day(week, 4) })
+    assert.equal(r.status, 409)
+  })
+
+  test('taking one day off leaves the other days of that shop', async () => {
+    const r = await req('/api/plan', {
+      as: U.komil, method: 'DELETE', body: { sana: day(week, 4), store_ids: [Number(fourth)] },
+    })
+    assert.equal(r.status, 200)
+    assert.equal(r.json.removed, 1)
+    assert.equal(psql(`select string_agg(visit_date::text, ',') from week_plans
+                        where week_start='${week}' and store_id=${fourth}`), day(week, 1))
+  })
+
+  test('two days of one shop: one visit closes one task, not both', async () => {
+    const [mon, tue, thu] = [day(past2, 0), day(past2, 1), day(past2, 3)]
+    assert.equal((await plan({ sanalar: [mon, thu], user_id: U.sardor,
+      store_ids: [Number(store), Number(other)] })).status, 200)
+    visitOn(U.sardor, store, tue)   // after Monday, before Thursday: Monday, late
+    visitOn(U.sardor, store, thu)   // Thursday, on the day
+    visitOn(U.sardor, other, mon)   // only Monday
+
+    const r = await req(`/api/plan?hafta=${past2}`, { as: U.komil })
+    const at = (s, d) => r.json.rows.find((x) => String(x.store_id) === String(s) && x.visit_date === d).holat
+    assert.equal(at(store, mon), 'kechikdi')
+    assert.equal(at(store, thu), 'bajarildi')
+    assert.equal(at(other, mon), 'bajarildi')
+    assert.equal(at(other, thu), 'borilmadi', 'one Monday visit closed the Thursday task too')
   })
 
   test('a shop can be taken off the plan', async () => {
@@ -1876,10 +2007,7 @@ describe('the weekly plan', () => {
   })
 
   test('a manager sees their own week but cannot edit it', async () => {
-    await req('/api/plan', {
-      as: U.komil, method: 'POST',
-      body: { hafta: week, user_id: U.sardor, store_ids: [Number(store)] },
-    })
+    await plan({ sana: today, user_id: U.sardor, store_ids: [Number(store)] })
     const r = await req(`/api/plan?hafta=${week}`, { as: U.sardor })
     assert.equal(r.status, 200)
     assert.equal(r.json.canEdit, false)
@@ -1889,5 +2017,69 @@ describe('the weekly plan', () => {
   test('the page is reachable signed in, and not otherwise', async () => {
     assert.equal((await req('/admin/reja', { as: U.sardor })).status, 200)
     assert.ok([302, 307].includes((await req('/admin/reja')).status))
+  })
+})
+
+describe('the store directory from the spreadsheet', () => {
+  let a, b, saved
+  const lit = (v) => (v === null ? 'null' : `'${String(v).replace(/'/g, "''")}'`)
+
+  before(() => {
+    ;[a, b] = psql("select string_agg(id::text, ',' order by id) from (select id from stores where active order by id limit 2) x").split(',')
+    saved = JSON.parse(psql(`select json_agg(json_build_object('id', id, 't', territory, 's', store_type))
+                               from stores where id in (${a}, ${b})`))
+    psql(`update stores set territory = 'TEST Hudud',  store_type = 'TEST turi' where id = ${a};
+          update stores set territory = 'TEST Boshqa', store_type = 'TEST turi' where id = ${b};`)
+  })
+  after(() => {
+    for (const r of saved) psql(`update stores set territory = ${lit(r.t)}, store_type = ${lit(r.s)} where id = ${r.id}`)
+  })
+
+  test('a sotuv_manager cannot pull the store list', async () => {
+    assert.equal((await req('/api/stores/sync', { as: U.sardor, method: 'POST' })).status, 403)
+  })
+
+  test('anonymous cannot either', async () => {
+    const r = await req('/api/stores/sync', { method: 'POST' })
+    assert.ok([401, 500].includes(r.status), `got ${r.status}`)
+  })
+
+  test('an admin gets a report, or a clean reason it could not run', async () => {
+    // really calls Google: it worked, credentials are missing, or the sheet said no
+    const r = await req('/api/stores/sync', { as: U.komil, method: 'POST' })
+    assert.ok([200, 502, 503].includes(r.status), `got ${r.status}`)
+    if (r.status !== 200) { assert.ok(r.json.error, 'a failure must say why'); return }
+    assert.ok(r.json.total > 0)
+    assert.ok(Array.isArray(r.json.retired) && Array.isArray(r.json.skipped))
+    // the import may have rewritten the fixture rows; put the test values back
+    psql(`update stores set territory = 'TEST Hudud',  store_type = 'TEST turi' where id = ${a};
+          update stores set territory = 'TEST Boshqa', store_type = 'TEST turi' where id = ${b};`)
+  })
+
+  test('/dokon filters by territory, by type, and by "not set"', async () => {
+    const has = (html, id) => html.includes(`href="/dokon/${id}"`)
+    const byTerritory = await req('/dokon?hudud=TEST%20Hudud', { as: U.komil })
+    assert.equal(byTerritory.status, 200)
+    assert.ok(has(byTerritory.text, a) && !has(byTerritory.text, b))
+
+    const byType = await req('/dokon?turi=TEST%20turi', { as: U.komil })
+    assert.ok(has(byType.text, a) && has(byType.text, b))
+
+    const both = await req('/dokon?hudud=TEST%20Boshqa&turi=TEST%20turi', { as: U.komil })
+    assert.ok(!has(both.text, a) && has(both.text, b))
+
+    const unset = await req('/dokon?hudud=-', { as: U.komil })
+    assert.ok(!has(unset.text, a) && !has(unset.text, b))
+  })
+
+  test('the plan and MML APIs carry territory and type for their filters', async () => {
+    const plan = await req('/api/plan', { as: U.komil })
+    const s = plan.json.stores.find((x) => String(x.id) === String(a))
+    assert.equal(s.territory, 'TEST Hudud')
+    assert.equal(s.store_type, 'TEST turi')
+
+    const mml = await req('/api/mml', { as: U.komil })
+    assert.equal(mml.status, 200)
+    if (mml.json.stores.length) assert.ok('territory' in mml.json.stores[0] && 'store_type' in mml.json.stores[0])
   })
 })

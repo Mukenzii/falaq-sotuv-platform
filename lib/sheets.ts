@@ -67,16 +67,25 @@ function config() {
   return { email, key, sheetId }
 }
 
-/** The sheet the export is pointed at, for showing on the admin page. */
-export function spreadsheetTarget(): { id: string; url: string } | null {
+/** The tab a Sheets link points at (#gid=… or ?gid=…), or null for none. */
+export function gidFrom(value: string): string | null {
+  const m = /[#?&]gid=(\d+)/.exec(value ?? '')
+  return m ? m[1] : null
+}
+
+/** The sheet (and tab) the export is pointed at, for writing and for the admin page. */
+export function spreadsheetTarget(): { id: string; url: string; gid: string | null } | null {
   const raw = process.env.SHEETS_SPREADSHEET_URL || process.env.SHEETS_SPREADSHEET_ID
   const id = raw ? spreadsheetIdFrom(raw) : null
-  return id ? { id, url: `https://docs.google.com/spreadsheets/d/${id}/edit` } : null
+  const gid = raw ? gidFrom(raw) : null
+  const url = `https://docs.google.com/spreadsheets/d/${id}/edit${gid ? `#gid=${gid}` : ''}`
+  return id ? { id, url, gid } : null
 }
 
 /**
  * Where the must-list is read FROM, which need not be the sheet the visits are
- * written TO. Falls back to the export sheet, which is where it lives today.
+ * written TO. Falls back to the export sheet; set MML_SHEET_URL when the two
+ * differ (the export moved to "Sotuv uchun", the must-list did not).
  */
 export function mmlSource(): { id: string; url: string; tab: string } | null {
   const raw = process.env.MML_SHEET_URL
@@ -85,6 +94,26 @@ export function mmlSource(): { id: string; url: string; tab: string } | null {
   const id = raw ? spreadsheetIdFrom(raw) : null
   const tab = process.env.MML_SHEET_TAB || "Do'kon MML"
   return id ? { id, url: `https://docs.google.com/spreadsheets/d/${id}/edit`, tab } : null
+}
+
+/**
+ * Where the store directory is read from. STORES_SHEET_URL, else the MML
+ * sheet, since both live in "Sotuv uchun". Read only — Viewer access is enough.
+ */
+export function storesSource(): { id: string; url: string; tab: string; gradeTab: string } | null {
+  const raw = process.env.STORES_SHEET_URL
+    || process.env.MML_SHEET_URL
+    || process.env.SHEETS_SPREADSHEET_URL
+    || process.env.SHEETS_SPREADSHEET_ID
+  const id = raw ? spreadsheetIdFrom(raw) : null
+  return id
+    ? {
+        id,
+        url: `https://docs.google.com/spreadsheets/d/${id}/edit`,
+        tab: process.env.STORES_SHEET_TAB || "Do'konlar yangi",
+        gradeTab: process.env.STORES_GRADE_TAB || "Do'konlar",
+      }
+    : null
 }
 
 const b64url = (s: string | Buffer) =>
@@ -151,15 +180,42 @@ async function ensureTab(title: string) {
   })
 }
 
-/** Replaces a tab's contents. Header row first. */
-export async function writeTab(title: string, rows: (string | number | null)[][]) {
-  await ensureTab(title)
-  await api(`/values/${encodeURIComponent(title)}:clear`, { method: 'POST', body: '{}' })
+/**
+ * Replace the visits tab: the tab the configured link points at (by gid), or
+ * "vizitlar" when the link names none.
+ *
+ * This clears the whole tab, and the target is now a spreadsheet the team works
+ * in by hand. So it refuses a tab that holds anything it did not write itself
+ * — empty, or first cell equal to `mark` — rather than wipe someone's data
+ * because a link pointed one tab to the left.
+ */
+export async function writeVisitsSheet(rows: (string | number | null)[][], mark: string) {
+  const target = spreadsheetTarget()
+  let title = 'vizitlar'
+  if (target?.gid) {
+    const meta = await api('?fields=sheets.properties(sheetId,title)')
+    const hit = meta.sheets?.find((s: any) => String(s.properties.sheetId) === target.gid)
+    if (!hit) throw new Error(`Havoladagi varaq (gid=${target.gid}) jadvalda topilmadi`)
+    title = hit.properties.title
+  } else {
+    await ensureTab(title)
+  }
+
+  const range = `'${title.replace(/'/g, "''")}'`
+  const now = await api(`/values/${encodeURIComponent(range)}`)
+  const values: unknown[][] = now.values ?? []
+  const empty = !values.some((r) => r.some((c) => String(c ?? '').trim() !== ''))
+  if (!empty && values[0]?.[0] !== mark) {
+    throw new Error(`"${title}" varag'ida boshqa ma'lumot bor — ustiga yozilmadi. ` +
+      "Bo'sh varaqning havolasini qo'ying.")
+  }
+
+  await api(`/values/${encodeURIComponent(range)}:clear`, { method: 'POST', body: '{}' })
   await api(
-    `/values/${encodeURIComponent(title)}!A1?valueInputOption=RAW`,
+    `/values/${encodeURIComponent(range + '!A1')}?valueInputOption=RAW`,
     { method: 'PUT', body: JSON.stringify({ values: rows }) },
   )
-  return rows.length - 1
+  return { title, rows: rows.length - 1 }
 }
 
 /**

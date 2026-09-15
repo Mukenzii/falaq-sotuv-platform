@@ -71,9 +71,11 @@ export default async function StoreDetail({ params }: { params: Promise<{ id: st
 
       <h2>Ma&apos;lumot</h2>
       <dl className="detail">
-        <div className="drow"><dt>Hudud</dt><dd>{s.region}</dd></div>
+        <div className="drow"><dt>Hudud</dt><dd>{s.territory ?? s.region}</dd></div>
+        <div className="drow"><dt>Turi</dt><dd>{s.store_type ?? s.letter_code ?? '—'}</dd></div>
+        <div className="drow"><dt>Toifa</dt><dd>{s.grade ?? '—'}</dd></div>
+        <div className="drow"><dt>Agent</dt><dd>{s.agent ?? '—'}</dd></div>
         <div className="drow"><dt>Kanal</dt><dd>{s.channel ?? '—'}</dd></div>
-        <div className="drow"><dt>Turi</dt><dd>{s.letter_code ?? '—'}</dd></div>
         <div className="drow"><dt>Mas&apos;ul menejer</dt><dd>{s.owner ?? 'biriktirilmagan'}</dd></div>
         <div className="drow"><dt>Borish oralig&apos;i</dt><dd>har {s.visit_every_days} kunda</dd></div>
         <div className="drow"><dt>O&apos;rtacha javon</dt><dd>{st.area ? `${st.area} m²` : '—'}</dd></div>

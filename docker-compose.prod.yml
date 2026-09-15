@@ -73,6 +73,7 @@ services:
       # name a host the phone can reach over TLS. nginx serves the bucket as a
       # path on the same origin, so this is just the site's own address.
       MINIO_PUBLIC_ENDPOINT: ${MINIO_PUBLIC_ENDPOINT:-https://${DOMAIN}}
+      APP_PUBLIC_URL: ${APP_PUBLIC_URL:-https://${DOMAIN}}
       MINIO_ACCESS_KEY: ${MINIO_USER}
       MINIO_SECRET_KEY: ${MINIO_PASSWORD}
       MINIO_BUCKET: ${MINIO_BUCKET:-falaq-photos}
@@ -87,6 +88,9 @@ services:
       # where the must-list is read from; empty falls back to the sheet above
       MML_SHEET_URL: ${MML_SHEET_URL:-}
       MML_SHEET_TAB: ${MML_SHEET_TAB:-}
+      STORES_SHEET_URL: ${STORES_SHEET_URL:-}
+      STORES_SHEET_TAB: ${STORES_SHEET_TAB:-}
+      STORES_GRADE_TAB: ${STORES_GRADE_TAB:-}
       # Leave unset behind the bundled nginx: the cookie follows
       # X-Forwarded-Proto. Set to "true" only if TLS is terminated somewhere
       # that does not pass that header through.

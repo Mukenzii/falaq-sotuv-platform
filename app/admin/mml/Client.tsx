@@ -1,9 +1,12 @@
 'use client'
 
-import { useEffect, useState } from 'react'
+import { Fragment, useEffect, useState } from 'react'
+import { StoreFilters } from '@/app/StoreFilters'
+import { storeMatches } from '@/lib/storeFilter'
 
 type Store = {
   store_id: number; code: string; store_name: string; store_category: string | null
+  territory: string | null; store_type: string | null
   kerak: string; bor: string; yetishmaydi: string; mml: string | null; oxirgi_vizit: string | null
 }
 type Total = { kerak: string | null; bor: string | null; mml: string | null; hech_borilmagan: string }
@@ -20,6 +23,19 @@ type Row = {
 }
 
 const pct = (v: string | null) => (v === null ? null : Number(v))
+
+/** The same company figure the API computes, over a filtered set of stores. */
+function totalOf(rows: Store[]): Total {
+  const seen = rows.filter((s) => s.oxirgi_vizit)
+  const kerak = seen.reduce((a, s) => a + Number(s.kerak), 0)
+  const bor = seen.reduce((a, s) => a + Number(s.bor), 0)
+  return {
+    kerak: seen.length ? String(kerak) : null,
+    bor: seen.length ? String(bor) : null,
+    mml: kerak ? String(Math.round((1000 * bor) / kerak) / 10) : null,
+    hech_borilmagan: String(rows.length - seen.length),
+  }
+}
 
 /** Red below 70, amber to 90, green above — the same reading as the shelf. */
 function Bar({ value }: { value: number }) {
@@ -129,6 +145,8 @@ export default function MmlClient() {
   const [err, setErr] = useState('')
   const [syncing, setSyncing] = useState(false)
   const [sync, setSync] = useState<Sync | null>(null)
+  const [hudud, setHudud] = useState('')
+  const [turi, setTuri] = useState('')
 
   const loadAll = () => fetch('/api/mml').then((r) => r.json()).then(setData)
   useEffect(() => { loadAll() }, [])
@@ -218,7 +236,10 @@ export default function MmlClient() {
 
   if (!data) return <main id="main" className="wrap-wide"><p className="sub">Yuklanmoqda…</p></main>
 
-  const { stores, total, books } = data
+  const { stores, books } = data
+  const filtering = !!(hudud || turi)
+  const shown = stores.filter((s) => storeMatches(s, hudud, turi))
+  const total = filtering ? totalOf(shown) : data.total
   const company = pct(total?.mml ?? null)
   const visited = stores.filter((s) => s.oxirgi_vizit)
 
@@ -296,6 +317,14 @@ export default function MmlClient() {
 
       <h2>Do&apos;konlar</h2>
       <p className="hint" style={{ marginTop: 0 }}>Eng yomoni yuqorida. Qatorni bosing — nimasi yetishmayotgani ko&apos;rinadi.</p>
+      <StoreFilters stores={stores} hudud={hudud} turi={turi} idPrefix="mml"
+                    onChange={(k, v) => (k === 'hudud' ? setHudud(v) : setTuri(v))}
+                    onClear={() => { setHudud(''); setTuri('') }} />
+      {filtering && (
+        <p className="hint" style={{ marginTop: 0 }}>
+          Yuqoridagi umumiy ko&apos;rsatkichlar ham shu filtr bo&apos;yicha: {shown.length} ta do&apos;kon.
+        </p>
+      )}
       <div className="card" style={{ overflowX: 'auto' }}>
         <table>
           <thead>
@@ -305,11 +334,11 @@ export default function MmlClient() {
             </tr>
           </thead>
           <tbody>
-            {stores.map((s) => {
+            {shown.map((s) => {
               const v = pct(s.mml)
               return (
-                <>
-                  <tr key={s.store_id} onClick={() => show(s.store_id)} style={{ cursor: 'pointer' }}>
+                <Fragment key={s.store_id}>
+                  <tr onClick={() => show(s.store_id)} style={{ cursor: 'pointer' }}>
                     <td data-label="Do'kon">{s.code}<br /><span className="hint">{s.store_name}</span></td>
                     <td data-label="Toifa">{s.store_category ?? <span className="hint">toifasiz</span>}</td>
                     <td data-label="Kerak">{s.kerak}</td>
@@ -337,7 +366,7 @@ export default function MmlClient() {
                       </td>
                     </tr>
                   )}
-                </>
+                </Fragment>
               )
             })}
           </tbody>
@@ -347,6 +376,7 @@ export default function MmlClient() {
       <h2>Eng ko&apos;p yetishmaydigan kitoblar</h2>
       <p className="hint" style={{ marginTop: 0 }}>
         Faqat borilgan do&apos;konlar hisobga olingan. Bu — yetkazib berish ro&apos;yxati.
+        {filtering && ' Filtr bu ro‘yxatga qo‘llanmaydi — barcha do‘konlar bo‘yicha.'}
       </p>
       <div className="card" style={{ overflowX: 'auto' }}>
         <table>

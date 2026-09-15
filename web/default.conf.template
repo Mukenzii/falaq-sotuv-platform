@@ -66,8 +66,10 @@ server {
 
   # routes the separated frontend has taken over
   location = /login { try_files /index.html =404; }
-  location /mml     { try_files /index.html =404; }
-  location /mlrr    { return 301 /mml; }   # renamed 2026-09-11
+
+  # the SPA's copy of the MML page is gone; old links go to the real one
+  location = /mml  { return 301 /admin/mml; }
+  location = /mlrr { return 301 /admin/mml; }
 
   # everything not yet ported is still served by Next
   location / { proxy_pass http://app; }

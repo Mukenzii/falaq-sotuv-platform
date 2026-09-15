@@ -17,11 +17,11 @@ export async function GET(req: Request) {
 
   const data = await asUser(me, async (db) => {
     const stores = await db.execute(sql`
-      select store_id, code, store_name, store_category,
-             kerak, bor, yetishmaydi, mml,
-             to_char(oxirgi_vizit, 'YYYY-MM-DD') oxirgi_vizit
-        from v_mml
-       order by mml asc nulls last, yetishmaydi desc`)
+      select m.store_id, m.code, m.store_name, m.store_category, s.territory, s.store_type,
+             m.kerak, m.bor, m.yetishmaydi, m.mml,
+             to_char(m.oxirgi_vizit, 'YYYY-MM-DD') oxirgi_vizit
+        from v_mml m join stores s on s.id = m.store_id
+       order by m.mml asc nulls last, m.yetishmaydi desc, m.store_id`)
 
     // The company number: one ratio over every (store, required book) pair, so
     // a shop with 200 required titles counts for more than one with 8.
