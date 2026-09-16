@@ -5,15 +5,42 @@ import { requireUserId } from '@/lib/session'
 import { REF_CACHE } from '@/lib/httpCache'
 
 /**
- * Stores this person may visit. RLS narrows it to their own territory,
- * so the dropdown can never offer a store that isn't theirs.
- * ?reja=1 returns only stores that are due, newest-overdue first.
+ * Stores. Every signed-in person may see and visit any shop since db/16 — the
+ * weekly plan, not the store list, is what says who should go where.
+ *
+ * ?reja=1  shops that are overdue by visit_every_days, newest-overdue first.
+ *          Shop-level and the same for everyone; it knows nothing about who
+ *          a shop was given to.
+ * ?menga=1 the shops on THIS person's plan: every task of the current week,
+ *          plus tasks from earlier weeks they never closed — a shop missed
+ *          last Thursday is still theirs to visit. This is what the new-visit
+ *          form opens on.
  */
 export async function GET(req: Request) {
   const me = await requireUserId()
-  const due = new URL(req.url).searchParams.get('reja') === '1'
+  const q = new URL(req.url).searchParams
+  const due = q.get('reja') === '1'
+  const mine = q.get('menga') === '1'
 
   const rows = await asUser(me, async (db) => {
+    if (mine) {
+      const r = await db.execute(sql`
+        select s.id, s.code, s.name, s.region, s.territory, s.store_type,
+               to_char(min(p.visit_date), 'YYYY-MM-DD') as reja_sana,
+               min(p.week_start) < week_of()            as eski,
+               bool_and(p.bajarildi)                    as bajarildi
+          from v_week_plan p
+          join stores s on s.id = p.store_id
+         where p.user_id = current_user_id()
+           and s.active
+           -- this week in full, and anything older still not done
+           and (p.week_start = week_of()
+                or (p.week_start < week_of() and not p.bajarildi))
+         group by s.id
+         order by min(p.visit_date), s.code`)
+      return r.rows
+    }
+
     const r = due
       ? await db.execute(sql`
           select s.id, s.code, s.name, s.region, r.kun_otdi, r.oxirgi_vizit

@@ -15,7 +15,21 @@ import type { Block, FormDoc, QuestionBlock, Section } from '@/lib/form/types'
  * would behave differently in the field.
  */
 
-type Store = { id: number; code: string; name: string; region: string; kun_otdi?: number }
+type Store = {
+  id: number; code: string; name: string; region: string; kun_otdi?: number
+  // only on the ?menga=1 list: the plan's own answer about this shop
+  reja_sana?: string | null; eski?: boolean; bajarildi?: boolean
+}
+
+// index 0 is Sunday, because that is what getUTCDay() returns
+const WEEKDAYS = ['Yakshanba', 'Dushanba', 'Seshanba', 'Chorshanba', 'Payshanba', 'Juma', 'Shanba']
+
+/** Which day the plan wants this shop on, or that it is owed from before. */
+function planLabel(s: Store): string {
+  if (s.eski) return "o'tgan haftadan"
+  if (!s.reja_sana) return ''
+  return WEEKDAYS[new Date(s.reja_sana + 'T00:00:00Z').getUTCDay()]
+}
 type Book = { id: number; title: string }
 
 const PLACEMENT = [
@@ -71,6 +85,9 @@ export default function Renderer({
 }) {
   const preview = mode === 'preview'
   const [stores, setStores] = useState<Store[]>([])
+  const [mine, setMine] = useState<Store[]>([])
+  // the plan is what the dropdown opens on; the toggle under it opens it up
+  const [onlyMine, setOnlyMine] = useState(true)
   const [due, setDue] = useState<Map<number, number>>(new Map())
   const [books, setBooks] = useState<Book[]>([])
   const [f, setF] = useState<any>({ placement: [], shelf_heights: [], visit_result: [] })
@@ -91,9 +108,11 @@ export default function Renderer({
   // network answer replaces it as soon as it lands.
   const cachedStores = useCached<Store[]>('stores', '/api/stores')
   const cachedDue = useCached<Store[]>('stores-reja', '/api/stores?reja=1')
+  const cachedMine = useCached<Store[]>('stores-menga', '/api/stores?menga=1')
   const cachedBooks = useCached<Book[]>('books', '/api/books')
 
   useEffect(() => { if (cachedStores.data) setStores(cachedStores.data) }, [cachedStores.data])
+  useEffect(() => { if (cachedMine.data) setMine(cachedMine.data) }, [cachedMine.data])
   useEffect(() => { if (cachedBooks.data) setBooks(cachedBooks.data) }, [cachedBooks.data])
   useEffect(() => {
     if (cachedDue.data) setDue(new Map(cachedDue.data.map((s) => [s.id, s.kun_otdi ?? 0])))
@@ -254,26 +273,49 @@ export default function Renderer({
     }
 
     switch (b.coreKey) {
-      case 'store_id':
+      case 'store_id': {
+        // The plan decides what this opens on. It does not decide what may be
+        // filed: a manager standing in a shop nobody planned still has to be
+        // able to log the visit, and the database has allowed any shop since
+        // db/16. So the plan is the default, not a gate.
+        const usingMine = onlyMine && mine.length > 0
+        const list = usingMine ? mine : sorted
         return wrap(
           <>
             <label htmlFor="store">{b.title}{star}</label>
             <select id="store" disabled={preview} value={f.store_id ?? ''}
               onChange={(e) => setF((x: any) => ({ ...x, store_id: e.target.value }))}>
               <option value="">— tanlang —</option>
-              {sorted.map((s) => (
-                <option key={s.id} value={s.id}>{due.has(s.id) ? '● ' : ''}{s.code}</option>
+              {list.map((s) => (
+                <option key={s.id} value={s.id}>
+                  {usingMine
+                    ? `${s.bajarildi ? '✓ ' : ''}${s.code}${planLabel(s) ? ` — ${planLabel(s)}` : ''}`
+                    : `${due.has(s.id) ? '● ' : ''}${s.code}`}
+                </option>
               ))}
             </select>
+            {mine.length > 0 && (
+              <button type="button" className="btn btn-ghost btn-sm" style={{ marginTop: 8 }}
+                disabled={preview} onClick={() => setOnlyMine((v) => !v)}>
+                {usingMine
+                  ? `Hamma do'konlar (${stores.length})`
+                  : `Menga biriktirilganlar (${mine.length})`}
+              </button>
+            )}
             <p className="hint">
-              {chosenStore
-                ? due.has(chosenStore.id)
-                  ? `● ${due.get(chosenStore.id) === 999 ? 'hali borilmagan' : due.get(chosenStore.id) + ' kun oldin borilgan'}`
-                  : 'yaqinda borilgan'
-                : "● belgisi — borish vaqti kelgan do'konlar"}
+              {usingMine
+                ? "Shu hafta sizga biriktirilgan do'konlar · ✓ borilgan"
+                : mine.length === 0
+                  ? "Sizga do'kon biriktirilmagan — hamma do'konlar ko'rsatilyapti"
+                  : chosenStore
+                    ? due.has(chosenStore.id)
+                      ? `● ${due.get(chosenStore.id) === 999 ? 'hali borilmagan' : due.get(chosenStore.id) + ' kun oldin borilgan'}`
+                      : 'yaqinda borilgan'
+                    : "● belgisi — borish vaqti kelgan do'konlar"}
             </p>
           </>,
         )
+      }
       case 'width_m': case 'height_m': case 'open_from': case 'open_to': {
         const isNum = b.coreKey === 'width_m' || b.coreKey === 'height_m'
         return wrap(

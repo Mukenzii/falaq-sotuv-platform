@@ -2063,3 +2063,78 @@ describe('an admin deleting a filed visit', () => {
     assert.equal(r.status, 404)
   })
 })
+
+describe('the new-visit list opens on the shops you were given', () => {
+  let week, past, today, mine, second, oldDone, oldOpen, notMine, all
+
+  const ids = () => [mine, second, oldDone, oldOpen, notMine].join(',')
+  const clean = () => psql(`delete from week_plans where store_id in (${ids()});
+    delete from visit_books where visit_id in (select id from visits where store_id in (${ids()}));
+    delete from visits where store_id in (${ids()})`)
+
+  // straight into the table: the API refuses to plan across two weeks, and
+  // "a task left over from last week" is the whole point of these tests
+  const planRow = (who, store, date, weekStart) => psql(`
+    insert into week_plans (week_start, visit_date, store_id, user_id)
+    values ('${weekStart}', '${date}', ${store}, '${who}')
+    on conflict (store_id, visit_date) do update set user_id = excluded.user_id`)
+  const visitOn = (who, store, date) =>
+    psql(`insert into visits (manager_id, store_id, visited_at) values ('${who}', ${store}, '${date} 12:00')`)
+  const menga = (as) => req('/api/stores?menga=1', { as })
+  const codes = (json) => json.map((s) => String(s.id))
+
+  before(() => {
+    week = psql('select week_of()::text')
+    past = psql('select (week_of() - 7)::text')
+    today = psql('select current_date::text')
+    // well clear of the shops earlier suites visit and plan
+    all = psql("select string_agg(id::text, ',' order by id) from (select id from stores where active order by id offset 21 limit 5) x").split(',')
+    ;[mine, second, oldDone, oldOpen, notMine] = all
+    clean()
+  })
+  after(clean)
+
+  test('the shops planned for you this week are the list', async () => {
+    planRow(U.sardor, mine, today, week)
+    planRow(U.sardor, second, today, week)
+    const r = await menga(U.sardor)
+    assert.equal(r.status, 200)
+    assert.deepEqual(codes(r.json).sort(), [mine, second].sort())
+    assert.equal(r.json.find((s) => String(s.id) === mine).reja_sana, today)
+    assert.equal(r.json.find((s) => String(s.id) === mine).eski, false)
+  })
+
+  test('a task you never closed last week is still yours', async () => {
+    planRow(U.sardor, oldOpen, past, past)
+    const r = await menga(U.sardor)
+    const row = r.json.find((s) => String(s.id) === oldOpen)
+    assert.ok(row, 'last week\'s unfinished task fell off the list')
+    assert.equal(row.eski, true)
+    assert.equal(row.bajarildi, false)
+  })
+
+  test('a task you did close last week is gone from it', async () => {
+    planRow(U.sardor, oldDone, past, past)
+    visitOn(U.sardor, oldDone, past)
+    const r = await menga(U.sardor)
+    assert.ok(!codes(r.json).includes(oldDone), 'a finished task is still being offered')
+  })
+
+  test('somebody else\'s plan is not in yours', async () => {
+    planRow(U.otabek, notMine, today, week)
+    assert.ok(!codes((await menga(U.sardor)).json).includes(notMine))
+    assert.ok(codes((await menga(U.otabek)).json).includes(notMine))
+  })
+
+  test('nothing planned means an empty list, not everyone else\'s', async () => {
+    const r = await menga(U.komil)
+    assert.equal(r.status, 200)
+    assert.deepEqual(r.json, [])
+  })
+
+  test('the full list is untouched, so the form can still offer all of them', async () => {
+    const r = await req('/api/stores', { as: U.sardor })
+    assert.ok(r.json.length > 5)
+    assert.ok(codes(r.json).includes(notMine), 'the unassigned shop must still be reachable')
+  })
+})
