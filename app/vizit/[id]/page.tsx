@@ -3,6 +3,7 @@ import { sql } from 'drizzle-orm'
 import Link from 'next/link'
 import { asUser } from '@/lib/db'
 import { currentUserId } from '@/lib/session'
+import DeleteVisit from './DeleteVisit'
 import { answerText, type AnswerFile, type AnswerValue } from '@/lib/form/answers'
 import type { FormDoc, QuestionBlock } from '@/lib/form/types'
 
@@ -40,10 +41,14 @@ export default async function VisitDetail({ params }: { params: Promise<{ id: st
         join users u on u.id = v.manager_id
         join stores s on s.id = v.store_id
        where v.id = ${id}`)).rows[0] as any
-    if (!v) return { visit: null }
+    if (!v) return { visit: null, canDelete: false }
+
+    // only an admin may remove a visit (db/22); everyone else never sees the button
+    const admin = await db.execute(sql`select can_manage_users() ok`)
 
     return {
       visit: v,
+      canDelete: !!(admin.rows[0] as { ok: boolean }).ok,
       books: (await db.execute(sql`
         select b.title, vb.status from visit_books vb
           join books b on b.id = vb.book_id
@@ -174,6 +179,11 @@ export default async function VisitDetail({ params }: { params: Promise<{ id: st
           ) : null}
         </Row>
       </dl>
+
+      {d.canDelete && (
+        <DeleteVisit id={v.id} storeId={String(v.store_id)} storeCode={v.store_code}
+                     when={when.format(new Date(v.visited_at))} />
+      )}
     </main>
   )
 }

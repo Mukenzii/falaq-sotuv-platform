@@ -37,7 +37,7 @@ function signingKey(secret: string, date: string): Buffer {
 
 /** `path` is the already-encoded canonical URI, e.g. /bucket or /bucket/a/b.jpg */
 function presignPath(
-  method: 'PUT' | 'GET' | 'HEAD',
+  method: 'PUT' | 'GET' | 'HEAD' | 'DELETE',
   path: string,
   expiresSeconds: number,
   useInternal = false,
@@ -134,4 +134,32 @@ export function objectKeyFor(visitDraftId: string, index: number, ext: string) {
 
 export function isConfigured(): boolean {
   try { config(); return true } catch { return false }
+}
+
+/**
+ * Remove objects for good, used when an admin deletes a visit. The database
+ * rows go inside the transaction; the files go after it commits, because an
+ * orphaned file costs disk and an orphaned row costs a broken page.
+ *
+ * Best effort on purpose: a photo that is already gone, or a MinIO that is
+ * briefly down, must not undo a delete the admin was told had happened. The
+ * internal endpoint is used — no browser is involved, so nothing here needs to
+ * be signed for the address a phone would use.
+ */
+export async function deleteObjects(objectKeys: string[]): Promise<number> {
+  if (!isConfigured() || !objectKeys.length) return 0
+  let gone = 0
+  for (const key of objectKeys) {
+    try {
+      const url = presignPath('DELETE', objectPath(key), 60, true)
+      const r = await fetch(url, { method: 'DELETE' })
+      // S3 answers 204 both for a key it removed and for one that was never
+      // there, and 404 is the same outcome from our side: the file is not there
+      if (r.ok || r.status === 404) gone++
+      else console.error('[minio] delete failed:', key, r.status)
+    } catch (e) {
+      console.error('[minio] delete failed:', key, (e as Error).message)
+    }
+  }
+  return gone
 }

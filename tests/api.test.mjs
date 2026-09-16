@@ -2002,3 +2002,64 @@ describe('the store directory from the spreadsheet', () => {
     if (mml.json.stores.length) assert.ok('territory' in mml.json.stores[0] && 'store_type' in mml.json.stores[0])
   })
 })
+
+describe('an admin deleting a filed visit', () => {
+  let VISIT
+
+  test('a manager files one, with books on it', async () => {
+    const r = await req('/api/visits', {
+      as: U.sardor, method: 'POST',
+      body: { store_id: Number(STORE_A), present_book_ids: [1, 2], stale_book_ids: [3], note: 'delete me' },
+    })
+    assert.equal(r.status, 201)
+    VISIT = r.json.id
+    assert.equal(psql(`select count(*) from visit_books where visit_id = '${VISIT}'`), '3')
+  })
+
+  test('the manager who filed it cannot delete it', async () => {
+    const r = await req(`/api/visits/${VISIT}`, { as: U.sardor, method: 'DELETE' })
+    assert.equal(r.status, 403)
+    assert.equal(psql(`select count(*) from visits where id = '${VISIT}'`), '1')
+  })
+
+  test('a hudud_rahbari who can see it still cannot delete it', async () => {
+    // seeing and removing are different powers: the whole point of the audit
+    const r = await req(`/api/visits/${VISIT}`, { as: U.dilshod, method: 'DELETE' })
+    assert.equal(r.status, 403)
+    assert.equal(psql(`select count(*) from visits where id = '${VISIT}'`), '1')
+  })
+
+  test('the direktor deletes it, and the book rows go with it', async () => {
+    const r = await req(`/api/visits/${VISIT}`, {
+      as: U.komil, method: 'DELETE', body: { sabab: 'ikki marta yuborilgan' },
+    })
+    assert.equal(r.status, 200)
+    assert.equal(r.json.deleted, true)
+    assert.equal(psql(`select count(*) from visits where id = '${VISIT}'`), '0')
+    assert.equal(psql(`select count(*) from visit_books where visit_id = '${VISIT}'`), '0')
+  })
+
+  test('the deletion is written down: who, why, and which shop', async () => {
+    assert.equal(psql(`select reason from deleted_visits where visit_id = '${VISIT}'`),
+      'ikki marta yuborilgan')
+    assert.equal(psql(`select deleted_by from deleted_visits where visit_id = '${VISIT}'`), U.komil)
+    // the code is copied into the log, not joined, so it outlives the shop
+    assert.ok(psql(`select store_code from deleted_visits where visit_id = '${VISIT}'`).length > 0)
+  })
+
+  test('the app role cannot rewrite the log it just wrote', () => {
+    assert.equal(psql(`select has_table_privilege('falaq_app', 'deleted_visits', 'delete')`), 'f')
+    assert.equal(psql(`select has_table_privilege('falaq_app', 'deleted_visits', 'update')`), 'f')
+  })
+
+  test('deleting it again is a 404, not a second log row', async () => {
+    const r = await req(`/api/visits/${VISIT}`, { as: U.komil, method: 'DELETE' })
+    assert.equal(r.status, 404)
+    assert.equal(psql(`select count(*) from deleted_visits where visit_id = '${VISIT}'`), '1')
+  })
+
+  test('an id that is not a uuid is a 404, not a crash', async () => {
+    const r = await req('/api/visits/not-a-uuid', { as: U.komil, method: 'DELETE' })
+    assert.equal(r.status, 404)
+  })
+})
