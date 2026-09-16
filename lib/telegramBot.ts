@@ -1,3 +1,4 @@
+import { randomBytes } from 'node:crypto'
 import { sql } from 'drizzle-orm'
 import { asSystem } from '@/lib/db'
 
@@ -95,23 +96,42 @@ export async function drainUpdates(): Promise<void> {
               set username = excluded.username, display_name = excluded.display_name`)
         }
 
-        if (!nonce) return { kind: 'noop' as const, name }
-
         // Ten minutes, once. An expired or already-used nonce claims nothing.
-        const claim = await db.execute(sql`
-          update login_tokens
-             set telegram_id = ${from}, claimed_at = now()
-           where nonce = ${nonce}
-             and claimed_at is null
-             and created_at > now() - interval '10 minutes'
-          returning nonce`)
-        if (!claim.rows.length) return { kind: 'stale' as const, name }
-        return { kind: 'claimed' as const, name }
+        if (nonce) {
+          const claim = await db.execute(sql`
+            update login_tokens
+               set telegram_id = ${from}, claimed_at = now()
+             where nonce = ${nonce}
+               and claimed_at is null
+               and created_at > now() - interval '10 minutes'
+            returning nonce`)
+          if (claim.rows.length) return { kind: 'claimed' as const, name }
+        }
+
+        // Nothing to claim: either a bare /start, which is all Telegram sends
+        // once the chat exists, or a link already used. Somebody who is on the
+        // list must not be stuck here, so hand them a one-time link instead of
+        // advice. It is theirs alone — delivered in their own chat — so it
+        // signs in whatever device they open it on (db/24).
+        const base = publicBase()
+        if (name && base) {
+          const token = randomBytes(16).toString('hex')
+          await db.execute(sql`
+            insert into login_tokens (nonce, telegram_id, claimed_at, bot_issued)
+            values (${token}, ${from}, now(), true)`)
+          return { kind: 'link' as const, name, url: `${base}/kirish?t=${token}` }
+        }
+        return { kind: nonce ? ('stale' as const) : ('noop' as const), name }
       })
 
       // Always answer. A bot that stays silent is indistinguishable from a
       // broken one, which is exactly how this looked before.
-      if (outcome.kind === 'noop') {
+      if (outcome.kind === 'link') {
+        await sendMessage(chat,
+          `Salom, ${outcome.name}. Kirish uchun shu havolani bosing — 10 daqiqa amal qiladi:\n` +
+          `${outcome.url}\n\n` +
+          'Telefon yoki kompyuter — qaysi qurilmada ochsangiz, o‘shanisiga kirasiz.')
+      } else if (outcome.kind === 'noop') {
         await sendMessage(chat, outcome.name
           ? `Salom, ${outcome.name}. Kirish uchun saytdagi “Telegram orqali kirish” tugmasini bosing.`
           : 'Salom! So‘rovingiz administratorga yuborildi. U sizni tasdiqlagach, saytdagi “Telegram orqali kirish” tugmasi orqali kira olasiz.')
@@ -156,4 +176,14 @@ export function ensureBotPolling() {
     setTimeout(tick, 2000)
   }
   setTimeout(tick, 500)
+}
+
+/**
+ * Absolute address of the site, for links that travel outside the browser.
+ * Compose always sets APP_PUBLIC_URL in production (defaulting to the domain);
+ * with nothing set there is no honest link to send, and the caller falls back
+ * to the old advice rather than sending a broken one.
+ */
+function publicBase(): string {
+  return (process.env.APP_PUBLIC_URL ?? '').trim().replace(/\/+$/, '')
 }

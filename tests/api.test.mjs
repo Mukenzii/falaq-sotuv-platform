@@ -2275,3 +2275,69 @@ describe('the main screen counts your own plan', () => {
     assert.match(html, /2 ta do&#x27;kon biriktirilgan, 1 tasiga borildi/)
   })
 })
+
+describe('signing in a second time, and on a second device', () => {
+  let TG
+  const mk = (nonce, { bot = true, age = '0 minutes' } = {}) => psql(`
+    insert into login_tokens (nonce, telegram_id, claimed_at, bot_issued, created_at)
+    values ('${nonce}', ${TG}, now(), ${bot}, now() - interval '${age}')`)
+  const open = async (t) => {
+    const r = await fetch(`${BASE}/kirish?t=${t}`, { redirect: 'manual' })
+    const cookie = /(falaq_session=[^;]+)/.exec(r.headers.get('set-cookie') ?? '')?.[1] ?? null
+    return { status: r.status, to: r.headers.get('location'), cookie }
+  }
+  const clean = () => psql(`delete from login_tokens where nonce like 'dd%' or nonce like 'ee%'`)
+
+  before(() => {
+    TG = psql(`select telegram_id from users where id = '${U.sardor}'`)
+    clean()
+  })
+  after(clean)
+
+  test('the link the bot sends signs you in', async () => {
+    const t = 'dd'.repeat(16)
+    mk(t)
+    const r = await open(t)
+    assert.equal(r.status, 303)
+    assert.equal(r.to, '/', 'a relative location, or a phone is sent to localhost')
+    assert.ok(r.cookie, 'no session was handed out')
+    // and that session really is that person
+    const me = await fetch(`${BASE}/api/me`, { headers: { cookie: r.cookie } })
+    assert.equal(me.status, 200)
+    assert.equal((await me.json()).id, U.sardor)
+  })
+
+  test('the same link a second time does not', async () => {
+    const r = await open('dd'.repeat(16))
+    assert.equal(r.to, '/login?eskirgan=1')
+    assert.equal(r.cookie, null)
+  })
+
+  test('a browser-flow nonce cannot be traded for a session here', async () => {
+    const t = 'ee'.repeat(16)
+    mk(t, { bot: false })
+    const r = await open(t)
+    assert.equal(r.cookie, null, 'a cookie-bound nonce was accepted by the bot link route')
+  })
+
+  test('a link older than ten minutes is refused', async () => {
+    const t = 'dd' + 'ee'.repeat(15)
+    mk(t, { age: '11 minutes' })
+    assert.equal((await open(t)).cookie, null)
+  })
+
+  test('the phone and the laptop can be signed in at the same time', async () => {
+    const a = 'dd0' + 'd'.repeat(29)
+    const b = 'dd1' + 'd'.repeat(29)
+    mk(a); mk(b)
+    const phone = await open(a)
+    const laptop = await open(b)
+    assert.ok(phone.cookie && laptop.cookie)
+    // neither sign-in ended the other: the cookie carries the user, not a
+    // server-side session that a later login could replace
+    for (const [what, c] of [['phone', phone.cookie], ['laptop', laptop.cookie]]) {
+      const r = await fetch(`${BASE}/api/me`, { headers: { cookie: c } })
+      assert.equal(r.status, 200, `${what} was signed out by the other device`)
+    }
+  })
+})

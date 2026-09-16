@@ -21,6 +21,14 @@ export default function Login() {
   const until = useRef(0)
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null)
 
+  // Arriving from an expired or already-used bot link: say so, rather than
+  // showing a bare button to someone who just pressed a link that did nothing.
+  useEffect(() => {
+    if (new URLSearchParams(location.search).get('eskirgan') === '1') {
+      setErr('Havola eskirgan yoki allaqachon ishlatilgan. Pastdagi tugmani bosing — bot yangisini yuboradi.')
+    }
+  }, [])
+
   const stop = () => { if (timer.current) clearTimeout(timer.current); timer.current = null }
   useEffect(() => stop, [])
 
