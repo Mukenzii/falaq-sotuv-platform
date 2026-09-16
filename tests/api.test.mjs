@@ -2138,3 +2138,98 @@ describe('the new-visit list opens on the shops you were given', () => {
     assert.ok(codes(r.json).includes(notMine), 'the unassigned shop must still be reachable')
   })
 })
+
+describe('plans that repeat', () => {
+  let week, thu, a, b, c
+
+  const ids = () => [a, b, c].join(',')
+  const clean = () => psql(`delete from plan_rules where store_id in (${ids()});
+    delete from week_plans where store_id in (${ids()});
+    delete from visits where store_id in (${ids()})`)
+  const rules = (method, body, as = U.komil) => req('/api/plan/rules', { as, method, body })
+  const dates = (store) => psql(`select coalesce(string_agg(to_char(visit_date,'YYYY-MM-DD'), ',' order by visit_date), '')
+    from week_plans where store_id = ${store}`).split(',').filter(Boolean)
+  const gap = (x, y) => Math.round((new Date(y) - new Date(x)) / 864e5)
+
+  before(() => {
+    week = psql('select week_of()::text')
+    thu = psql('select (week_of() + 3)::text')          // Thursday of this week
+    ;[a, b, c] = psql("select string_agg(id::text, ',' order by id) from (select id from stores where active order by id offset 31 limit 3) x").split(',')
+    clean()
+  })
+  after(clean)
+
+  test('a fortnightly Thursday rule fills the board forward', async () => {
+    const r = await rules('POST', { sanalar: [thu], user_id: U.sardor, store_ids: [Number(a)], takror: 'ikki_hafta' })
+    assert.equal(r.status, 200)
+    assert.equal(r.json.rules, 1)
+    assert.ok(r.json.planned >= 3, `only ${r.json.planned} tasks placed`)
+
+    const d = dates(a)
+    assert.ok(d.every((x) => new Date(x).getUTCDay() === 4), 'not every task is a Thursday')
+    for (let i = 1; i < d.length; i++) assert.equal(gap(d[i - 1], d[i]), 14, 'not a fortnight apart')
+  })
+
+  test('nothing is ever written into the past', () => {
+    assert.equal(psql(`select count(*) from week_plans where store_id = ${a} and visit_date < current_date`), '0')
+  })
+
+  test('the board says which tasks came from a rule', async () => {
+    const r = await req(`/api/plan?hafta=${week}`, { as: U.komil })
+    const row = r.json.rows.find((x) => String(x.store_id) === a)
+    if (row) assert.ok(row.rule_id, 'a generated task is not marked as one')
+    assert.equal(psql(`select count(*) from week_plans where store_id = ${a} and rule_id is null`), '0')
+  })
+
+  test('a manager cannot make a rule, and a bad cadence is refused', async () => {
+    assert.equal((await rules('POST', { sanalar: [thu], user_id: U.sardor, store_ids: [Number(b)], takror: 'haftada' }, U.sardor)).status, 403)
+    assert.equal((await rules('POST', { sanalar: [thu], user_id: U.sardor, store_ids: [Number(b)], takror: 'kuniga' })).status, 400)
+  })
+
+  test('a generated task that is removed stays removed', async () => {
+    const before = dates(a)
+    const victim = before[before.length - 1]
+    assert.equal((await req('/api/plan', { as: U.komil, method: 'DELETE', body: { sana: victim, store_ids: [Number(a)] } })).status, 200)
+    assert.ok(!dates(a).includes(victim))
+
+    const top = await rules('POST', { tuldirish: true })
+    assert.equal(top.status, 200)
+    assert.ok(!dates(a).includes(victim), 'the rule put back a day an admin removed')
+  })
+
+  test('a generated task that is moved stays moved', async () => {
+    const from = dates(a)[0]
+    const to = psql(`select ('${from}'::date - 1)::text`)   // Wednesday of the same week
+    const r = await req('/api/plan', { as: U.komil, method: 'PATCH', body: { store_id: Number(a), sana: from, yangi_sana: to } })
+    assert.equal(r.status, 200)
+    assert.equal(psql(`select rule_id from week_plans where store_id = ${a} and visit_date = '${to}'`), '',
+      'a hand-moved task still belongs to its rule')
+
+    await rules('POST', { tuldirish: true })
+    assert.ok(!dates(a).includes(from), 'the rule refilled the day a task was moved off')
+    assert.ok(dates(a).includes(to), 'the moved task disappeared')
+  })
+
+  test('once a month lands on the first such weekday of the month', async () => {
+    const r = await rules('POST', { sanalar: [thu], user_id: U.sardor, store_ids: [Number(c)], takror: 'oy' })
+    assert.equal(r.status, 200)
+    const d = dates(c)
+    assert.ok(d.length > 0, 'a monthly rule placed nothing at all')
+    assert.ok(d.every((x) => Number(x.slice(8, 10)) <= 7), `not all first-of-month: ${d}`)
+    assert.ok(d.every((x) => new Date(x).getUTCDay() === 4))
+  })
+
+  test('deleting a rule clears what is ahead and leaves the past alone', async () => {
+    const ruleId = psql(`select id from plan_rules where store_id = ${c} limit 1`)
+    // a task from before today that the rule placed back when it was in date
+    psql(`insert into week_plans (week_start, visit_date, store_id, user_id, rule_id)
+          values (week_of() - 7, week_of() - 4, ${c}, '${U.sardor}', ${ruleId})`)
+
+    const r = await rules('DELETE', { id: Number(ruleId) })
+    assert.equal(r.status, 200)
+    assert.ok(r.json.removed >= 1)
+    assert.equal(psql(`select count(*) from week_plans where store_id = ${c} and visit_date >= current_date`), '0')
+    assert.equal(psql(`select count(*) from week_plans where store_id = ${c} and visit_date < current_date`), '1')
+    assert.equal(psql(`select count(*) from plan_rules where id = ${ruleId}`), '0')
+  })
+})

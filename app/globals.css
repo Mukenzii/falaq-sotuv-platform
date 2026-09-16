@@ -941,3 +941,6 @@ th.txt { text-align: left; }
 /* the service-account address to share the sheet with, plus a copy button */
 .sharecopy { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin: 6px 0; }
 .sharecopy input[type=text] { flex: 1 1 18rem; min-width: 0; padding: 7px 9px; font-size: 14px; }
+
+/* a task a rule placed, not a person */
+.krule { font-style: normal; opacity: .55; font-size: 12px; }

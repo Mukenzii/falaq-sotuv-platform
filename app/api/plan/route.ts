@@ -2,6 +2,8 @@ import { NextResponse } from 'next/server'
 import { sql } from 'drizzle-orm'
 import { asUser, pgArray, pgCode } from '@/lib/db'
 import { requireUserId } from '@/lib/session'
+import { ensurePlanTopUp } from '@/lib/planLoop'
+import { mondayOf, parseDate } from '@/lib/plan'
 
 /**
  * The weekly plan: which shops each person must visit, and on which days.
@@ -11,23 +13,6 @@ import { requireUserId } from '@/lib/session'
  * the scoping — an admin sees and edits everyone, a manager sees their own
  * week and their team's, and nobody else's.
  */
-
-const DATE = /^\d{4}-\d{2}-\d{2}$/
-
-/** A real calendar date as YYYY-MM-DD, or null. */
-function parseDate(value: unknown): string | null {
-  if (typeof value !== 'string' || !DATE.test(value)) return null
-  const d = new Date(value + 'T00:00:00Z')
-  return !isNaN(+d) && d.toISOString().slice(0, 10) === value ? value : null
-}
-
-/** Monday of the week containing the given date, or of this week. */
-function mondayOf(value: string | null): string {
-  const d = parseDate(value) ? new Date(value + 'T00:00:00Z') : new Date()
-  const day = (d.getUTCDay() + 6) % 7          // 0 = Monday
-  d.setUTCDate(d.getUTCDate() - day)
-  return d.toISOString().slice(0, 10)
-}
 
 const ids = (v: unknown): number[] | null => {
   const a = (Array.isArray(v) ? v : []).map(Number)
@@ -49,12 +34,15 @@ export async function GET(req: Request) {
   const me = await requireUserId()
   const week = mondayOf(new URL(req.url).searchParams.get('hafta'))
 
+  // anyone opening the plan arms the nightly top-up; it is a no-op after the first
+  ensurePlanTopUp()
+
   const data = await asUser(me, async (db) => {
     const rows = await db.execute(sql`
       select week_start, to_char(visit_date, 'YYYY-MM-DD') visit_date, holat,
              user_id, full_name, store_id, code, store_name, store_category,
              bajarildi, to_char(visited_at, 'YYYY-MM-DD') visited_at,
-             to_char(boshqa_vizit, 'YYYY-MM-DD') boshqa_vizit
+             to_char(boshqa_vizit, 'YYYY-MM-DD') boshqa_vizit, rule_id
         from v_week_plan
        where week_start = ${week}
        order by visit_date, full_name, code, store_id`)
@@ -160,10 +148,19 @@ export async function PATCH(req: Request) {
     const res = await asUser(me, async (db) => {
       const admin = await db.execute(sql`select can_manage_users() ok`)
       if (!(admin.rows[0] as { ok: boolean }).ok) return 'forbidden' as const
+      // A task a person moves or hands over stops belonging to its rule, and
+      // the rule is told never to refill the day it came off. Both have to
+      // happen before the update, which is what clears rule_id.
+      await db.execute(sql`
+        insert into plan_rule_skips (rule_id, visit_date)
+        select rule_id, visit_date from week_plans
+         where store_id = ${storeId} and visit_date = ${day} and rule_id is not null
+        on conflict do nothing`)
       const r = await db.execute(sql`
         update week_plans
            set visit_date = coalesce(${to}::date, visit_date),
-               user_id    = coalesce(${userId}::uuid, user_id)
+               user_id    = coalesce(${userId}::uuid, user_id),
+               rule_id    = null
          where store_id = ${storeId} and visit_date = ${day}
         returning store_id`)
       return r.rows.length
@@ -188,6 +185,19 @@ export async function DELETE(req: Request) {
 
   try {
     const n = await asUser(me, async (db) => {
+      // remember which generated days were taken off, so the next run of the
+      // rules does not quietly put them back
+      await db.execute(day
+        ? sql`insert into plan_rule_skips (rule_id, visit_date)
+              select rule_id, visit_date from week_plans
+               where visit_date = ${day} and store_id = any(${pgArray(storeIds)}::bigint[])
+                 and rule_id is not null
+              on conflict do nothing`
+        : sql`insert into plan_rule_skips (rule_id, visit_date)
+              select rule_id, visit_date from week_plans
+               where week_start = ${week} and store_id = any(${pgArray(storeIds)}::bigint[])
+                 and rule_id is not null
+              on conflict do nothing`)
       const r = day
         ? await db.execute(sql`
             delete from week_plans

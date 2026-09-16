@@ -16,6 +16,13 @@ type Row = {
   user_id: string; full_name: string
   store_id: Id; code: string; store_name: string; store_category: string | null
   bajarildi: boolean; visited_at: string | null; boshqa_vizit: string | null
+  // set when a repeating rule placed this task rather than a person
+  rule_id: number | null
+}
+type Rule = {
+  id: number; store_id: Id; code: string; store_name: string
+  user_id: string; full_name: string; weekday: number
+  cadence: string; anchor: string; kelajak: string
 }
 type Summary = {
   user_id: string; full_name: string; reja: string; bajarildi: string; vaqtida: string
@@ -39,6 +46,19 @@ const HOLAT: Record<Holat, { label: string; icon: string }> = {
   borilmadi:   { label: 'Borilmadi',          icon: '✕' },
 }
 const DAYS = ['Dushanba', 'Seshanba', 'Chorshanba', 'Payshanba', 'Juma', 'Shanba', 'Yakshanba']
+// 'bir_marta' is not a cadence, it is the absence of one: the plain assign
+// that has always been here. The rest are the cadences in db/23.
+const TAKROR: Array<[string, string]> = [
+  ['bir_marta',  'Bir marta'],
+  ['haftada',    'Har hafta'],
+  ['ikki_hafta', 'Ikki haftada bir'],
+  ['juft',       'Juft haftalar'],
+  ['toq',        'Toq haftalar'],
+  ['uch_hafta',  'Uch haftada bir'],
+  ['tort_hafta', "To'rt haftada bir"],
+  ['oy',         'Oyiga bir'],
+]
+const TAKROR_LABEL: Record<string, string> = Object.fromEntries(TAKROR)
 const SHORT = ['Du', 'Se', 'Ch', 'Pa', 'Ju', 'Sh', 'Ya']
 
 /** Monday of the week containing d, as YYYY-MM-DD. */
@@ -83,6 +103,8 @@ export default function RejaClient() {
   // assigner
   const [who, setWho] = useState('')
   const [days, setDays] = useState<string[]>([])
+  const [takror, setTakror] = useState('bir_marta')
+  const [rules, setRules] = useState<Rule[]>([])
   const [picked, setPicked] = useState<Set<string>>(new Set())
   const [q, setQ] = useState('')
   const [onlyFree, setOnlyFree] = useState(true)
@@ -98,6 +120,13 @@ export default function RejaClient() {
     if (n === seq.current) setData(j)
   }, [])
   useEffect(() => { load(week) }, [week, load])
+
+  // rules do not belong to a week, so they load once and reload after an edit
+  const loadRules = useCallback(async () => {
+    const r = await fetch('/api/plan/rules')
+    setRules(r.ok ? (await r.json()).rows : [])
+  }, [])
+  useEffect(() => { loadRules() }, [loadRules])
   // chosen days belong to the week they were chosen in
   useEffect(() => { setDays([]) }, [week])
 
@@ -145,6 +174,22 @@ export default function RejaClient() {
     }
     setMsg({ t: 'ok', m: ok, where })
     await load(week)
+    return true
+  }
+
+  async function callRules(method: 'POST' | 'DELETE', body: unknown, ok: (j: any) => string) {
+    setBusy(true); setMsg(null)
+    const r = await fetch('/api/plan/rules', {
+      method, headers: { 'content-type': 'application/json' }, body: JSON.stringify(body),
+    }).catch(() => null)
+    const j = r ? await r.json().catch(() => ({})) : {}
+    setBusy(false)
+    if (!r?.ok) {
+      setMsg({ t: 'err', m: j.error ?? 'Saqlanmadi', where: 'assign' })
+      return false
+    }
+    setMsg({ t: 'ok', m: ok(j), where: 'assign' })
+    await Promise.all([load(week), loadRules()])
     return true
   }
 
@@ -358,6 +403,12 @@ export default function RejaClient() {
                 </select>
               </div>
               <div className="field" style={{ marginBottom: 0, minWidth: 200 }}>
+                <label htmlFor="takror">Takrorlanish</label>
+                <select id="takror" value={takror} onChange={(e) => setTakror(e.target.value)}>
+                  {TAKROR.map(([v, l]) => <option key={v} value={v}>{l}</option>)}
+                </select>
+              </div>
+              <div className="field" style={{ marginBottom: 0, minWidth: 200 }}>
                 <label htmlFor="q">Qidirish</label>
                 <input id="q" type="text" value={q} onChange={(e) => setQ(e.target.value)}
                        placeholder="kod yoki nomi" />
@@ -428,20 +479,90 @@ export default function RejaClient() {
             <div className="row" style={{ marginTop: 14 }}>
               <button className="btn" disabled={busy || !who || !days.length || !picked.size}
                 onClick={async () => {
+                  const storeIds = [...picked].map(Number)
+                  // A cadence turns the same choice into a rule: the days picked
+                  // above become weekdays, and the board is filled forward.
+                  if (takror !== 'bir_marta') {
+                    if (await callRules('POST',
+                      { sanalar: days, user_id: who, store_ids: storeIds, takror },
+                      (j) => `${j.rules} ta qoida saqlandi — ${j.planned} ta reja ${j.weeks} haftaga yozildi`)) {
+                      setPicked(new Set())
+                    }
+                    return
+                  }
                   const label = days.length === 1
                     ? `${DAYS[dayIndex(week, days[0])].toLowerCase()}ga`
                     : `${dayNames(days)} kunlariga`
-                  if (await call('POST', { sanalar: days, user_id: who, store_ids: [...picked].map(Number) },
+                  if (await call('POST', { sanalar: days, user_id: who, store_ids: storeIds },
                     `${picked.size} ta do'kon — ${label} biriktirildi`, 'assign')) {
                     setPicked(new Set())
                   }
                 }}>
                 {!picked.size ? "Do'kon tanlang"
                   : !days.length ? 'Kun tanlang'
-                  : days.length === 1 ? `${picked.size} ta do'konni biriktirish`
-                  : `${picked.size} ta do'konni ${days.length} kunga biriktirish`}
+                  : takror !== 'bir_marta'
+                    ? `${picked.size} ta do'kon — ${TAKROR_LABEL[takror].toLowerCase()}`
+                    : days.length === 1 ? `${picked.size} ta do'konni biriktirish`
+                    : `${picked.size} ta do'konni ${days.length} kunga biriktirish`}
               </button>
             </div>
+            {takror !== 'bir_marta' && (
+              <p className="hint" style={{ marginTop: 10 }}>
+                Tanlangan kunlar hafta kuni sifatida saqlanadi, reja 8 haftaga oldindan yoziladi.
+                Rejadan qo&apos;lda olingan yoki boshqa kunga ko&apos;chirilgan kunlar qaytib kelmaydi.
+              </p>
+            )}
+          </div>
+
+          <h2>Takrorlanuvchi rejalar</h2>
+          <div className="card">
+            {!rules.length ? (
+              <p className="hint" style={{ margin: 0 }}>
+                Hali qoida yo&apos;q. Yuqorida &quot;Takrorlanish&quot;ni tanlab biriktirsangiz,
+                reja keyingi haftalarga o&apos;zi yoziladi.
+              </p>
+            ) : (
+              <>
+                <div className="tablewrap">
+                  <table>
+                    <thead>
+                      <tr>
+                        <th>Kod</th><th>Xodim</th><th>Kun</th><th>Takrorlanish</th>
+                        <th className="num">Oldinda</th><th />
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {rules.map((r) => (
+                        <tr key={r.id}>
+                          <td data-label="Kod">{r.code}</td>
+                          <td data-label="Xodim">{r.full_name}</td>
+                          <td data-label="Kun">{DAYS[r.weekday]}</td>
+                          <td data-label="Takrorlanish">{TAKROR_LABEL[r.cadence] ?? r.cadence}</td>
+                          <td className="num" data-label="Oldinda">{r.kelajak}</td>
+                          <td>
+                            <button type="button" className="btn btn-danger btn-sm" disabled={busy}
+                              onClick={() => callRules('DELETE', { id: r.id },
+                                (j) => `${r.code} — qoida o'chirildi, ${j.removed} ta kelgusi reja olindi`)}>
+                              O&apos;chirish
+                            </button>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+                <div className="row" style={{ marginTop: 14 }}>
+                  <button type="button" className="btn btn-ghost btn-sm" disabled={busy}
+                    onClick={() => callRules('POST', { tuldirish: true },
+                      (j) => `${j.planned} ta yangi reja yozildi (${j.weeks} hafta)`)}>
+                    Keyingi haftalarni to&apos;ldirish
+                  </button>
+                  <span className="hint" style={{ alignSelf: 'center' }}>
+                    Qoida o&apos;chirilsa, o&apos;tgan haftalar tegilmaydi — faqat kelgusi rejalar olinadi.
+                  </span>
+                </div>
+              </>
+            )}
           </div>
         </>
       )}
@@ -488,7 +609,10 @@ function CardBody({ row, showWho }: { row: Row; showWho: boolean }) {
         <i aria-hidden="true">{h.icon}</i>{h.label}
         {row.visited_at && <span className="kwhen">· {ddmm(row.visited_at)}</span>}
       </span>
-      <span className="kcode">{row.code}</span>
+      <span className="kcode">
+        {row.code}
+        {row.rule_id != null && <i className="krule" title="Takrorlanuvchi reja" aria-hidden="true"> ↻</i>}
+      </span>
       {name && <span className="kname">{row.store_name}</span>}
       {showWho && <span className="kwho">{row.full_name}</span>}
     </>
