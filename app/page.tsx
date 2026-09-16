@@ -10,9 +10,19 @@ export default async function Home() {
 
   const data = await asUser(me, async (db) => {
     const u = await db.execute(sql`select full_name, role from users where id = ${me}`)
+    // "borish kerak" is what the PLAN owes this person, not every overdue shop
+    // in the system: v_bugungi_reja is the territory-era view and reads the
+    // same for everyone, which made the headline a number nobody could act on.
     const s = await db.execute(sql`
       select
-        (select count(*) from v_bugungi_reja)                                     as due,
+        (select count(*) from v_week_plan p
+          where p.user_id = current_user_id()
+            and p.week_start <= week_of() and not p.bajarildi)                    as kerak,
+        (select count(*) from v_week_plan p
+          where p.user_id = current_user_id() and p.week_start = week_of())       as reja,
+        (select count(*) from v_week_plan p
+          where p.user_id = current_user_id()
+            and p.week_start = week_of() and p.bajarildi)                         as bajarildi,
         (select count(*) from visits where visited_at::date = current_date)       as today,
         (select count(*) from visits where visited_at > now() - interval '7 days')as week`)
     return { user: u.rows[0] as { full_name: string; role: string } | undefined, stat: s.rows[0] as any }
@@ -20,17 +30,24 @@ export default async function Home() {
 
   if (!data.user) redirect('/login')
   const isAdmin = data.user.role === 'direktor' || data.user.role === 'sotuv_boshligi'
-  const { due, today, week } = data.stat
+  const { kerak, reja, bajarildi, today, week } = data.stat
 
   return (
     <main id="main" className="wrap">
       {/* Lead with the one thing worth acting on, said as a sentence rather than a tile. */}
       <p className="headline">
-        {Number(due) > 0
-          ? <><em>{due} ta</em> do&apos;konga borish kerak.</>
-          : <>Hamma do&apos;konga borilgan.</>}
+        {Number(kerak) > 0
+          ? <><em>{kerak} ta</em> do&apos;konga borish kerak.</>
+          : Number(reja) > 0
+            ? <>Bu haftaning hammasiga borilgan.</>
+            : <>Sizga do&apos;kon biriktirilmagan.</>}
       </p>
       <p className="standfirst">
+        {/* the plan first, because that is what the headline counts; the visit
+            tally second, because it is the thing they can already see happening */}
+        {Number(reja) > 0
+          ? `Bu hafta ${reja} ta do'kon biriktirilgan, ${bajarildi} tasiga borildi. `
+          : ''}
         {Number(today) > 0
           ? `Bugun ${today} ta vizit yozdingiz. Bu haftada ${week} ta.`
           : `Bugun hali vizit yo'q. Bu haftada ${week} ta.`}

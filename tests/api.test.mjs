@@ -40,7 +40,7 @@ async function req(path, { as, method = 'GET', body } = {}) {
 }
 
 const U = {}
-let STORE_A, STORE_B, ORIGINAL_OWNERS
+let STORE_A, STORE_B, ORIGINAL_OWNERS, SOLO_DIREKTOR
 
 before(() => {
   assert.ok(SECRET && !SECRET.startsWith('change_me'), 'SESSION_SECRET must be set in .env')
@@ -58,6 +58,11 @@ before(() => {
   psql('update sheets_sync set paused = true where id')
 
   U.komil = psql("select id from users where role = 'direktor' and active order by created_at limit 1")
+  // guard_last_direktor only fires when there IS one direktor left. A database
+  // with two (a second admin added by hand, which is a normal thing to do) lets
+  // the demote through — and the suite would then demote a real person's
+  // account and deactivate it, which is exactly what happened on 2026-09-16.
+  SOLO_DIREKTOR = psql("select count(*) from users where role = 'direktor' and active") === '1'
   assert.match(U.komil, /^[0-9a-f-]{36}$/, 'the database has no active direktor to test as')
 
   const add = (tg, name, role, parent) => psql(`with x as (
@@ -307,13 +312,13 @@ describe('user management', () => {
     assert.equal((await req(`/api/users/${U.komil}`, { as: U.komil, method: 'DELETE' })).status, 404)
   })
 
-  test('the last direktor cannot be demoted', async () => {
+  test('the last direktor cannot be demoted', { skip: !SOLO_DIREKTOR && 'more than one active direktor' }, async () => {
     const r = await req(`/api/users/${U.komil}`, { as: U.komil, method: 'PATCH', body: { role: 'sotuv_manager' } })
     assert.equal(r.status, 409)
     assert.match(r.json.error, /direktor/)
   })
 
-  test('the last direktor cannot be deactivated', async () => {
+  test('the last direktor cannot be deactivated', { skip: !SOLO_DIREKTOR && 'more than one active direktor' }, async () => {
     const r = await req(`/api/users/${U.komil}`, { as: U.komil, method: 'PATCH', body: { active: false } })
     assert.equal(r.status, 409)
   })
@@ -1332,7 +1337,7 @@ describe('deleting people who have history', () => {
     assert.equal(psql(`select count(*) from visits where manager_id = '${victim}'`), '1')
   })
 
-  test('the last direktor is protected, and says so in Uzbek', async () => {
+  test('the last direktor is protected, and says so in Uzbek', { skip: !SOLO_DIREKTOR && 'more than one active direktor' }, async () => {
     const r = await req(`/api/users/${U.komil}`, { as: U.komil, method: 'PATCH', body: { role: 'sotuv_manager' } })
     assert.equal(r.status, 409)
     assert.match(r.json.error, /direktorni/i)
@@ -2231,5 +2236,42 @@ describe('plans that repeat', () => {
     assert.equal(psql(`select count(*) from week_plans where store_id = ${c} and visit_date >= current_date`), '0')
     assert.equal(psql(`select count(*) from week_plans where store_id = ${c} and visit_date < current_date`), '1')
     assert.equal(psql(`select count(*) from plan_rules where id = ${ruleId}`), '0')
+  })
+})
+
+describe('the main screen counts your own plan', () => {
+  let today, s1, s2
+
+  const clean = () => psql(`delete from week_plans where store_id in (${s1},${s2});
+    delete from visit_books where visit_id in (select id from visits where store_id in (${s1},${s2}));
+    delete from visits where store_id in (${s1},${s2})`)
+  const home = async (as) => (await req('/', { as })).text
+
+  before(() => {
+    today = psql('select current_date::text')
+    ;[s1, s2] = psql("select string_agg(id::text, ',' order by id) from (select id from stores where active order by id offset 61 limit 2) x").split(',')
+    clean()
+  })
+  after(clean)
+
+  test('with nothing planned it says so, instead of showing a number', async () => {
+    assert.match(await home(U.sardor), /biriktirilmagan/)
+  })
+
+  test('it counts the shops planned for you, not every overdue shop', async () => {
+    const r = await req('/api/plan', { as: U.komil, method: 'POST',
+      body: { sana: today, user_id: U.sardor, store_ids: [Number(s1), Number(s2)] } })
+    assert.equal(r.status, 200)
+    assert.match(await home(U.sardor), /<em>2(<!-- -->)? ta<\/em>/)
+    // the old headline came from v_bugungi_reja and read the same for everyone
+    assert.ok(!/<em>2(<!-- -->)? ta<\/em>/.test(await home(U.otabek)),
+      "another manager sees someone else's count")
+  })
+
+  test('a visit takes one off the count and shows up in the line below', async () => {
+    psql(`insert into visits (manager_id, store_id, visited_at) values ('${U.sardor}', ${s1}, now())`)
+    const html = await home(U.sardor)
+    assert.match(html, /<em>1(<!-- -->)? ta<\/em>/)
+    assert.match(html, /2 ta do&#x27;kon biriktirilgan, 1 tasiga borildi/)
   })
 })
