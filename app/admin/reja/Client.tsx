@@ -107,7 +107,11 @@ export default function RejaClient() {
   const [rules, setRules] = useState<Rule[]>([])
   const [picked, setPicked] = useState<Set<string>>(new Set())
   const [q, setQ] = useState('')
-  const [onlyFree, setOnlyFree] = useState(true)
+  // The store list opens unfiltered. "Faqat rejada yo'qlari" used to be on by
+  // default, which quietly hid every shop already on the board — so a shop you
+  // wanted to add a SECOND day for was missing, and the list looked short for
+  // no stated reason. It is still one click away.
+  const [onlyFree, setOnlyFree] = useState(false)
   const [hudud, setHudud] = useState('')
   const [turi, setTuri] = useState('')
 
