@@ -116,6 +116,12 @@ must-list sheet as **Viewer**. A sheet that is not shared returns
 Visits push themselves as soon as they are saved; `/admin/sheets` shows the
 last successful push and any error.
 
+The push writes **one tab per region** plus the master tab holding every visit.
+Region tabs are named after the region (`Farg'ona`, `Toshkent shahri`) and
+appear the first time that region has a visit. A tab that holds anything the
+export did not write itself is skipped, not overwritten — so a tab someone on
+the team keeps by hand is safe even if it is named after a region.
+
 ### 7. Updating
 
     git pull
@@ -204,6 +210,56 @@ so a preview cannot flatter a form that would behave differently in the field.
 - Importing questions reads a published version (or a Google form through the
   Forms API, when the service account is configured and the form is shared with
   it) and inserts copies with fresh ids. Nothing writes back to the source.
+
+## Regions and who visits what
+
+A **region** is one of Uzbekistan's 14 administrative units. It is the first two
+digits of the store code: `40` is Farg'ona, and `0104 Chilonzor` is district
+`04` of region `01`, Toshkent shahri. The 4-digit prefix is a *district* —
+there are 120 of them — and is not what anyone is given.
+
+There is no catch-all region (db/26 removed the `Boshqa` one db/25 had). A shop
+either belongs to a real region or has **no region at all**, and `region_code`
+is nullable to say so. Two kinds of shop have none:
+
+- **Abroad** — KR, KZ, RUS, MISR. Nobody can visit them, so nobody is given
+  them and they are not tracked. They are left alone, not filed somewhere.
+- **No location yet** — mostly online shops, plus a few whose code was never
+  filled in. `select * from v_hududsiz` lists them; the fix is to give them a
+  territory in the sheet and re-run the store import, after which the trigger
+  places them. Nothing is invented to fill the gap.
+
+A visit against a region-less shop still reaches the master tab in Sheets — it
+simply has no region tab to go in. It is never dropped.
+
+`region_code_of(code, territory)` derives it, preferring the sheet's territory
+column because it is right even where the code is not (one shop is coded by its
+phone number, and the KG shops are served out of Namangan). A trigger keeps
+`stores.region_code` in step, so an import cannot forget to set it and nobody
+can move a shop to another region's tab by hand.
+
+**Assignment is `stores.owner_id` and nothing else.** A manager sees only their
+own shops in the new-visit form, and `v_insert` refuses a visit filed against
+any other shop — the route answers 403 first so it can name the shop, but the
+policy stands on its own. `users.region_code` only records which region someone
+works; handing the shops over is the **Biriktirish** button on `/admin/users`,
+which is a bulk `PATCH /api/stores {hudud, owner_id}`. Run it again after a
+store import and the region's new shops are covered.
+
+This reverses db/16, which had dropped ownership on the grounds that any shop
+could be given to anyone. That is not how the team works: one region per
+person.
+
+Consequences worth knowing:
+
+- A person with no shops assigned cannot file any visit. That includes a
+  `direktor` — the gate is on the shop, not the role. Assign yourself a shop
+  before testing, or exempt `can_manage_users()` in `v_insert` (db/25).
+- Deactivating someone leaves their shops pointing at them. Hand the region to
+  their replacement, or those shops go unvisitable.
+- `/admin/reja` still plans any shop for any person. Planning a shop for
+  someone who does not own it now produces a task they cannot close — the plan
+  says *when*, ownership says *whether*. Assign the region first.
 
 ## Rules
 

@@ -171,53 +171,71 @@ async function api(path: string, init?: RequestInit, spreadsheetId?: string) {
   return body
 }
 
-/** Creates the tab if it isn't there yet, so a fresh spreadsheet just works. */
-async function ensureTab(title: string) {
-  const meta = await api('?fields=sheets.properties.title')
-  const exists = meta.sheets?.some((s: any) => s.properties.title === title)
-  if (exists) return
-  await api(':batchUpdate', {
-    method: 'POST',
-    body: JSON.stringify({ requests: [{ addSheet: { properties: { title } } }] }),
-  })
+/**
+ * Replace the visits tabs.
+ *
+ * There is one tab per region plus the master tab holding every visit — the
+ * region heads asked for their own page and nobody wanted to lose the single
+ * list. The master tab is the one the configured link points at (by gid), or
+ * "vizitlar" when the link names none; the region tabs are named after the
+ * region ("Farg'ona", "Toshkent shahri").
+ *
+ * Each write clears a whole tab, and the target is a spreadsheet the team works
+ * in by hand. So a tab is only overwritten when it is empty or its first cell
+ * is `mark` — anything else is somebody's own sheet and is left alone, and the
+ * tab is reported back as skipped rather than failing the whole push. One bad
+ * tab must not stop the other fourteen from being updated.
+ */
+export async function writeVisitTabs(
+  tabs: Array<{ title: string; rows: (string | number | null)[][] }>,
+  mark: string,
+): Promise<{ wrote: Record<string, number>; skipped: string[] }> {
+  // one metadata read for the whole push, not one per tab
+  const meta = await api('?fields=sheets.properties(sheetId,title)')
+  const existing: Array<{ sheetId: number; title: string }> =
+    (meta.sheets ?? []).map((x: any) => x.properties)
+
+  const missing = tabs.filter((t) => !existing.some((e) => e.title === t.title))
+  if (missing.length) {
+    await api(':batchUpdate', {
+      method: 'POST',
+      body: JSON.stringify({
+        requests: missing.map((t) => ({ addSheet: { properties: { title: t.title } } })),
+      }),
+    })
+  }
+
+  const wrote: Record<string, number> = {}
+  const skipped: string[] = []
+  for (const t of tabs) {
+    const range = `'${t.title.replace(/'/g, "''")}'`
+    const now = await api(`/values/${encodeURIComponent(range)}`)
+    const values: unknown[][] = now.values ?? []
+    const empty = !values.some((r) => r.some((c) => String(c ?? '').trim() !== ''))
+    if (!empty && values[0]?.[0] !== mark) { skipped.push(t.title); continue }
+
+    await api(`/values/${encodeURIComponent(range)}:clear`, { method: 'POST', body: '{}' })
+    await api(
+      `/values/${encodeURIComponent(range + '!A1')}?valueInputOption=RAW`,
+      { method: 'PUT', body: JSON.stringify({ values: t.rows }) },
+    )
+    wrote[t.title] = t.rows.length - 1
+  }
+  return { wrote, skipped }
 }
 
 /**
- * Replace the visits tab: the tab the configured link points at (by gid), or
- * "vizitlar" when the link names none.
- *
- * This clears the whole tab, and the target is now a spreadsheet the team works
- * in by hand. So it refuses a tab that holds anything it did not write itself
- * — empty, or first cell equal to `mark` — rather than wipe someone's data
- * because a link pointed one tab to the left.
+ * The name of the tab every visit goes to. The gid in the configured link when
+ * there is one — that is how the team points the export at a tab they made —
+ * otherwise "vizitlar".
  */
-export async function writeVisitsSheet(rows: (string | number | null)[][], mark: string) {
+export async function masterTabTitle(): Promise<string> {
   const target = spreadsheetTarget()
-  let title = 'vizitlar'
-  if (target?.gid) {
-    const meta = await api('?fields=sheets.properties(sheetId,title)')
-    const hit = meta.sheets?.find((s: any) => String(s.properties.sheetId) === target.gid)
-    if (!hit) throw new Error(`Havoladagi varaq (gid=${target.gid}) jadvalda topilmadi`)
-    title = hit.properties.title
-  } else {
-    await ensureTab(title)
-  }
-
-  const range = `'${title.replace(/'/g, "''")}'`
-  const now = await api(`/values/${encodeURIComponent(range)}`)
-  const values: unknown[][] = now.values ?? []
-  const empty = !values.some((r) => r.some((c) => String(c ?? '').trim() !== ''))
-  if (!empty && values[0]?.[0] !== mark) {
-    throw new Error(`"${title}" varag'ida boshqa ma'lumot bor — ustiga yozilmadi. ` +
-      "Bo'sh varaqning havolasini qo'ying.")
-  }
-
-  await api(`/values/${encodeURIComponent(range)}:clear`, { method: 'POST', body: '{}' })
-  await api(
-    `/values/${encodeURIComponent(range + '!A1')}?valueInputOption=RAW`,
-    { method: 'PUT', body: JSON.stringify({ values: rows }) },
-  )
-  return { title, rows: rows.length - 1 }
+  if (!target?.gid) return 'vizitlar'
+  const meta = await api('?fields=sheets.properties(sheetId,title)')
+  const hit = meta.sheets?.find((s: any) => String(s.properties.sheetId) === target.gid)
+  if (!hit) throw new Error(`Havoladagi varaq (gid=${target.gid}) jadvalda topilmadi`)
+  return hit.properties.title as string
 }
 
 /**

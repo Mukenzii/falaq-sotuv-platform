@@ -5,7 +5,10 @@ import { requireUserId } from '@/lib/session'
 
 type Ctx = { params: Promise<{ id: string }> }
 
-const FIELDS = ['telegram_id', 'full_name', 'phone', 'role', 'parent_id', 'active'] as const
+const FIELDS = ['telegram_id', 'full_name', 'phone', 'role', 'parent_id', 'active',
+  // one region per person (db/25). Assigning the region's shops is a separate
+  // call to PATCH /api/stores — this column only records which region it was.
+  'region_code'] as const
 
 export async function PATCH(req: Request, { params }: Ctx) {
   const me = await requireUserId()
@@ -19,7 +22,7 @@ export async function PATCH(req: Request, { params }: Ctx) {
     const row = await asUser(me, async (db) => {
       const r = await db.execute(sql`
         update users set ${sql.join(sets, sql`, `)} where id = ${id}
-        returning id, telegram_id, full_name, role, parent_id, active
+        returning id, telegram_id, full_name, role, parent_id, active, region_code
       `)
       return r.rows[0]
     })
@@ -29,6 +32,7 @@ export async function PATCH(req: Request, { params }: Ctx) {
     // guard_last_direktor raises a plain exception
     if (pgCode(e) === 'P0001') return NextResponse.json({ error: pgMessage(e) }, { status: 409 })
     if (pgCode(e) === '23505') return NextResponse.json({ error: 'Bu Telegram hisobi allaqachon mavjud' }, { status: 409 })
+    if (pgCode(e) === '23503') return NextResponse.json({ error: 'Bunday hudud yo‘q' }, { status: 400 })
     throw e
   }
 }

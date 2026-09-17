@@ -244,14 +244,35 @@ describe('hierarchy visibility', () => {
                  Number(psql('select count(*) from books where active')))
   })
 
-  test('a manager may log a visit to any shop, but only as themselves', async () => {
-    // the territory check is gone; the identity check is not
+  test('a manager may only log a visit to a shop that is theirs', async () => {
+    // db/25 put the shop check back: one region per person, and the shops in
+    // it are theirs. STORE_A is sardor's, STORE_B is otabek's.
     const ok = await req('/api/visits', {
-      as: U.sardor, method: 'POST', body: { store_id: Number(STORE_B) },
+      as: U.sardor, method: 'POST', body: { store_id: Number(STORE_A) },
     })
     assert.equal(ok.status, 201)
+
+    const notMine = await req('/api/visits', {
+      as: U.sardor, method: 'POST', body: { store_id: Number(STORE_B) },
+    })
+    assert.equal(notMine.status, 403, 'a shop belonging to someone else was accepted')
+    assert.match(notMine.json.error, /biriktirilmagan/)
+    assert.equal(psql(`select count(*) from visits where store_id = ${STORE_B}`), '0')
+  })
+
+  test('the shop check is the database\'s, not only the route\'s', () => {
+    // the route answers 403 first so the message can name the shop, but the
+    // policy has to stand on its own — a bug in the route must not open it up
+    assert.throws(() => psql(`begin;
+      select set_config('app.user_id', '${U.sardor}', true);
+      set local role falaq_app;
+      insert into visits (manager_id, store_id) values ('${U.sardor}', ${STORE_B});
+      rollback;`), /row-level security|violates/i)
+  })
+
+  test('manager_id still comes from the session, never the body', async () => {
     const forged = await req('/api/visits', {
-      as: U.sardor, method: 'POST', body: { store_id: Number(STORE_B), manager_id: U.otabek },
+      as: U.sardor, method: 'POST', body: { store_id: Number(STORE_A), manager_id: U.otabek },
     })
     assert.equal(forged.status, 201)
     assert.equal(psql(`select count(*) from visits where manager_id = '${U.otabek}'`), '0',
@@ -1594,7 +1615,11 @@ describe('MML from weights: named titles and category shares', () => {
 
   before(() => {
     store = psql("select id from stores where active order by id offset 30 limit 1")
-    saved = JSON.parse(psql(`select row_to_json(x) from (select store_type, grade from stores where id = ${store}) x`))
+    saved = JSON.parse(psql(`select row_to_json(x) from
+      (select store_type, grade, owner_id from stores where id = ${store}) x`))
+    // since db/25 a visit may only be filed against a shop that is the
+    // manager's, and these tests file visits as sardor
+    psql(`update stores set owner_id = '${U.sardor}' where id = ${store}`)
     clean()
     named = book('TEST MML nomma', 'TESTN')
     // three titles at 0,5 -> 1,5 -> target 2
@@ -1609,7 +1634,8 @@ describe('MML from weights: named titles and category shares', () => {
   })
   after(() => {
     clean()
-    psql(`update stores set store_type = ${lit(saved.store_type)}, grade = ${lit(saved.grade)} where id = ${store}`)
+    psql(`update stores set store_type = ${lit(saved.store_type)}, grade = ${lit(saved.grade)},
+                            owner_id = ${lit(saved.owner_id)}::uuid where id = ${store}`)
   })
 
   test('targets round up, in exact decimals', () => {
@@ -1714,7 +1740,7 @@ describe('MML from weights: named titles and category shares', () => {
 })
 
 describe('the weekly plan', () => {
-  let week, past, past2, today, sunday, store, other, third, fourth
+  let week, past, past2, today, sunday, store, other, third, fourth, savedOwners
 
   const clean = () => psql(`delete from week_plans
       where week_start in ('${week}', '${past}', '${past2}')
@@ -1741,9 +1767,23 @@ describe('the weekly plan', () => {
     // leftover visit would make a planned shop look done before anyone went
     const ids = psql("select string_agg(id::text, ',' order by id) from (select id from stores where active order by id offset 7 limit 4) x").split(',')
     ;[store, other, third, fourth] = ids
+    savedOwners = psql(`select string_agg(coalesce(quote_literal(owner_id::text), 'null'), ',' order by id)
+                          from stores where id in (${ids.join(',')})`).split(',')
+    // a visit can only be filed against your own shop now (db/25). The plan is
+    // a separate thing — who should go WHEN — so the two are set up separately:
+    // sardor owns three of these, otabek the one he covers in his own test.
+    psql(`update stores set owner_id = '${U.sardor}' where id in (${store}, ${third}, ${fourth});
+          update stores set owner_id = '${U.otabek}' where id = ${other};`)
     clean()
   })
-  after(clean)
+  after(() => {
+    clean()
+    if (savedOwners) {
+      for (const [i, id] of [store, other, third, fourth].entries()) {
+        psql(`update stores set owner_id = ${savedOwners[i]}::uuid where id = ${id}`)
+      }
+    }
+  })
 
   test('an admin gives shops to a person on a day', async () => {
     const r = await plan({ sana: today, user_id: U.sardor, store_ids: [Number(store), Number(other)] })
@@ -2069,8 +2109,8 @@ describe('an admin deleting a filed visit', () => {
   })
 })
 
-describe('the new-visit list opens on the shops you were given', () => {
-  let week, past, today, mine, second, oldDone, oldOpen, notMine, all
+describe('the new-visit list is the shops you were given', () => {
+  let week, past, today, mine, second, oldDone, oldOpen, notMine, all, savedOwners
 
   const ids = () => [mine, second, oldDone, oldOpen, notMine].join(',')
   const clean = () => psql(`delete from week_plans where store_id in (${ids()});
@@ -2095,52 +2135,182 @@ describe('the new-visit list opens on the shops you were given', () => {
     // well clear of the shops earlier suites visit and plan
     all = psql("select string_agg(id::text, ',' order by id) from (select id from stores where active order by id offset 21 limit 5) x").split(',')
     ;[mine, second, oldDone, oldOpen, notMine] = all
+    savedOwners = psql(`select string_agg(coalesce(quote_literal(owner_id::text), 'null'), ',' order by id)
+                          from stores where id in (${ids()})`).split(',')
+    // db/25: the list is stores.owner_id, not the plan. Four are sardor's, the
+    // fifth is otabek's.
+    psql(`update stores set owner_id = '${U.sardor}'
+           where id in (${mine}, ${second}, ${oldDone}, ${oldOpen});
+          update stores set owner_id = '${U.otabek}' where id = ${notMine};`)
     clean()
   })
-  after(clean)
-
-  test('the shops planned for you this week are the list', async () => {
-    planRow(U.sardor, mine, today, week)
-    planRow(U.sardor, second, today, week)
-    const r = await menga(U.sardor)
-    assert.equal(r.status, 200)
-    assert.deepEqual(codes(r.json).sort(), [mine, second].sort())
-    assert.equal(r.json.find((s) => String(s.id) === mine).reja_sana, today)
-    assert.equal(r.json.find((s) => String(s.id) === mine).eski, false)
+  after(() => {
+    clean()
+    for (const [i, id] of all.entries()) {
+      psql(`update stores set owner_id = ${savedOwners[i]}::uuid where id = ${id}`)
+    }
   })
 
-  test('a task you never closed last week is still yours', async () => {
+  test('the shops given to you are the list', async () => {
+    const r = await menga(U.sardor)
+    assert.equal(r.status, 200)
+    // exactly what the table says is sardor's — other suites hold shops of
+    // their own, so this is asked of the database rather than hardcoded
+    const owned = psql(`select coalesce(string_agg(id::text, ',' order by id), '')
+                          from stores where active and owner_id = '${U.sardor}'`).split(',').filter(Boolean)
+    assert.deepEqual(codes(r.json).sort(), owned.sort())
+    for (const id of [mine, second, oldDone, oldOpen]) assert.ok(codes(r.json).includes(id), id)
+    assert.ok(!codes(r.json).includes(notMine))
+  })
+
+  test('the plan decorates that list without shortening it', async () => {
+    // The plan used to BE the list. It is now a note on top of it: which day a
+    // shop is wanted on. A shop with no plan row is still yours to visit — a
+    // manager standing in one of their own shops on an unplanned day must not
+    // be told it is not theirs.
+    planRow(U.sardor, mine, today, week)
+    const r = await menga(U.sardor)
+    const row = r.json.find((s) => String(s.id) === mine)
+    assert.equal(row.reja_sana, today)
+    assert.equal(row.eski, false)
+    assert.equal(r.json.find((s) => String(s.id) === second).reja_sana, null,
+      'an unplanned shop must still be offered, just without a day')
+    for (const id of [mine, second, oldDone, oldOpen]) assert.ok(codes(r.json).includes(id), id)
+  })
+
+  test('a task you never closed last week is still flagged as owed', async () => {
     planRow(U.sardor, oldOpen, past, past)
     const r = await menga(U.sardor)
     const row = r.json.find((s) => String(s.id) === oldOpen)
-    assert.ok(row, 'last week\'s unfinished task fell off the list')
+    assert.ok(row, "last week's unfinished task fell off the list")
     assert.equal(row.eski, true)
     assert.equal(row.bajarildi, false)
   })
 
-  test('a task you did close last week is gone from it', async () => {
+  test('a task you did close last week stops being flagged, but the shop stays', async () => {
     planRow(U.sardor, oldDone, past, past)
     visitOn(U.sardor, oldDone, past)
     const r = await menga(U.sardor)
-    assert.ok(!codes(r.json).includes(oldDone), 'a finished task is still being offered')
+    const row = r.json.find((s) => String(s.id) === oldDone)
+    assert.ok(row, 'a shop that is yours disappeared because its task was closed')
+    assert.equal(row.reja_sana, null, 'a finished task is still being asked for')
   })
 
-  test('somebody else\'s plan is not in yours', async () => {
-    planRow(U.otabek, notMine, today, week)
+  test("somebody else's shop is not in yours", async () => {
     assert.ok(!codes((await menga(U.sardor)).json).includes(notMine))
     assert.ok(codes((await menga(U.otabek)).json).includes(notMine))
   })
 
-  test('nothing planned means an empty list, not everyone else\'s', async () => {
+  test('nothing assigned means an empty list, not everyone else\'s', async () => {
     const r = await menga(U.komil)
     assert.equal(r.status, 200)
     assert.deepEqual(r.json, [])
   })
 
-  test('the full list is untouched, so the form can still offer all of them', async () => {
-    const r = await req('/api/stores', { as: U.sardor })
-    assert.ok(r.json.length > 5)
-    assert.ok(codes(r.json).includes(notMine), 'the unassigned shop must still be reachable')
+  test('and the form cannot get at the rest of them', async () => {
+    // the full store table is still readable — the admin screens list it — but
+    // the shop the form will accept is only ever one of yours
+    const full = await req('/api/stores', { as: U.sardor })
+    assert.ok(codes(full.json).includes(notMine), 'the admin list lost a shop')
+    const r = await req('/api/visits', {
+      as: U.sardor, method: 'POST', body: { store_id: Number(notMine) },
+    })
+    assert.equal(r.status, 403)
+  })
+})
+
+describe('regions', () => {
+  // db/25 and db/26. The region is the first two digits of a store code: 40 is
+  // Farg'ona, 0104 Chilonzor is district 04 of region 01. The team reads it
+  // that way by eye and the export is split on it, so it is worth pinning down.
+  test('there are fourteen regions and no catch-all', () => {
+    assert.equal(psql('select count(*) from regions'), '14')
+    assert.equal(psql("select count(*) from regions where code = 'XX'"), '0',
+      'the Boshqa bucket is back')
+  })
+
+  test('a shop that cannot be placed has no region rather than a wrong one', () => {
+    // db/26: abroad (KR, KZ, RUS, MISR) and shops with no location at all.
+    // Inventing a region for them would put a shop nobody can visit on a
+    // region head's tab.
+    const stranded = psql(`select coalesce(string_agg(code, ', ' order by code), '')
+                             from stores where active and region_code is null`)
+    // every one of them must genuinely have nothing to go on
+    for (const code of stranded.split(', ').filter(Boolean)) {
+      assert.equal(psql(`select region_code_of(${"'"}${code.replace(/'/g, "''")}${"'"},
+        (select territory from stores where code = '${code.replace(/'/g, "''")}'))`), '',
+        `${code} could have been placed and was not`)
+    }
+  })
+
+  test('every shop that CAN be placed is placed', () => {
+    assert.equal(psql(`select count(*) from stores s
+                        where s.active
+                          and s.region_code is null
+                          and region_code_of(s.code, s.territory) is not null`), '0')
+  })
+
+  test('the region comes off the code, and the territory wins when they differ', () => {
+    const q = (v) => (v === null ? 'null' : `'${v.replace(/'/g, "''")}'`)
+    const of = (code, terr) => psql(`select region_code_of(${q(code)}, ${q(terr)})`)
+    assert.equal(of('0104 Zumar KTD', "0104 Chilonzor"), '01', 'a Tashkent district is region 01')
+    assert.equal(of('4015 Al-Hidoya KTD', "40 Farg'ona"), '40')
+    assert.equal(of('KG Diyora KTD', '50 Namangan'), '50',
+      'a shop whose code is not a number is placed by its territory')
+    // a shop coded by its phone number: the digits are not a region
+    assert.equal(of('998905863097', "40 Farg'ona"), '40')
+    assert.equal(of('AMAL store', null), '', 'nothing to go on means no region, not a bucket')
+    assert.equal(of('KZ Davron KTD', null), '', 'a shop abroad is in no Uzbek region')
+  })
+
+  test('a shop cannot be given a region by hand', () => {
+    // it is derived by a trigger, so an import can never forget to set it and
+    // nobody can quietly move a shop to another region head's tab
+    const id = psql("select min(id) from stores where active and region_code = '40'")
+    // '01' is a real region, so nothing but the trigger stands in the way
+    psql(`update stores set region_code = '01' where id = ${id}`)
+    assert.equal(psql(`select region_code from stores where id = ${id}`), '40',
+      'a hand-written region_code stuck')
+  })
+
+  test('the region list counts shops and names who holds them', async () => {
+    const r = await req('/api/regions', { as: U.komil })
+    assert.equal(r.status, 200)
+    assert.equal(r.json.length, Number(psql('select count(*) from regions')))
+    const total = r.json.reduce((a, g) => a + Number(g.dokonlar), 0)
+    // every active shop except the ones with no region at all
+    assert.equal(total, Number(psql('select count(*) from stores where active and region_code is not null')))
+  })
+
+  test('the shops with no region are listed so the sheet can be fixed', () => {
+    assert.equal(psql('select count(*) from v_hududsiz'),
+                 psql('select count(*) from stores where active and region_code is null'))
+  })
+
+  test('an admin hands a whole region over in one call, and a manager cannot', async () => {
+    const code = psql(`select region_code from stores where active and region_code is not null
+                        group by region_code order by count(*) desc limit 1`)
+    const n = Number(psql(`select count(*) from stores where active and region_code = '${code}'`))
+    const saved = psql(`select coalesce(string_agg(id || ':' || coalesce(owner_id::text, ''), ','), '')
+                          from stores where active and region_code = '${code}'`)
+
+    const no = await req('/api/stores', {
+      as: U.sardor, method: 'PATCH', body: { hudud: code, owner_id: U.sardor },
+    })
+    assert.equal(no.status, 403)
+
+    const ok = await req('/api/stores', {
+      as: U.komil, method: 'PATCH', body: { hudud: code, owner_id: U.malika },
+    })
+    assert.equal(ok.status, 200)
+    assert.equal(ok.json.updated, n)
+    assert.equal(psql(`select count(*) from stores where active and region_code = '${code}'
+                        and owner_id = '${U.malika}'`), String(n))
+
+    for (const pair of saved.split(',').filter(Boolean)) {
+      const [id, owner] = pair.split(':')
+      psql(`update stores set owner_id = ${owner ? `'${owner}'` : 'null'}::uuid where id = ${id}`)
+    }
   })
 })
 

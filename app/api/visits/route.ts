@@ -40,6 +40,29 @@ export async function POST(req: Request) {
     return NextResponse.json({ error: "do'kon tanlanmagan" }, { status: 400 })
   }
 
+  // A manager may only file against a shop that is theirs (db/25). The RLS
+  // policy v_insert enforces this on its own, but a policy violation arrives as
+  // a bare 42501 after the whole body has been validated and the photos
+  // uploaded — so check it up front and say which shop and why.
+  const owned = await asUser(me, async (db) => {
+    const r = await db.execute(sql`
+      select s.code, (s.owner_id = current_user_id()) as meniki, s.active
+        from stores s where s.id = ${b.store_id}`)
+    return r.rows[0] as { code: string; meniki: boolean; active: boolean } | undefined
+  })
+  if (!owned) {
+    return NextResponse.json({ error: "Bunday do'kon yo'q" }, { status: 404 })
+  }
+  if (!owned.active) {
+    return NextResponse.json({ error: `${owned.code} — bu do'kon faol emas` }, { status: 403 })
+  }
+  if (!owned.meniki) {
+    return NextResponse.json(
+      { error: `${owned.code} sizga biriktirilmagan — rahbaringizga ayting` },
+      { status: 403 },
+    )
+  }
+
   // Uzbek/Russian keyboards produce "7,5"; Number() makes that NaN. Accept both
   // separators here so the API is not stricter than the people using it.
   const num = (v: unknown): number | null => {

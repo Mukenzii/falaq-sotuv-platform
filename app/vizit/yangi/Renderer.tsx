@@ -17,7 +17,9 @@ import type { Block, FormDoc, QuestionBlock, Section } from '@/lib/form/types'
 
 type Store = {
   id: number; code: string; name: string; region: string; kun_otdi?: number
-  // only on the ?menga=1 list: the plan's own answer about this shop
+  // the region (viloyat) the shop is in, and its name — db/25
+  region_code?: string; hudud?: string; visit_every_days?: number
+  // the plan's own answer about this shop, when it is on this week's plan
   reja_sana?: string | null; eski?: boolean; bajarildi?: boolean
 }
 
@@ -84,11 +86,12 @@ export default function Renderer({
   onSubmitted?: () => void
 }) {
   const preview = mode === 'preview'
-  const [stores, setStores] = useState<Store[]>([])
+  // The shops assigned to this person, and nothing else. There is no longer a
+  // full store list in this form: the database will not accept a visit against
+  // a shop that is not theirs (db/25), so offering one would only produce a
+  // form that fills in and then fails on submit.
   const [mine, setMine] = useState<Store[]>([])
-  // the plan is what the dropdown opens on; the toggle under it opens it up
-  const [onlyMine, setOnlyMine] = useState(true)
-  const [due, setDue] = useState<Map<number, number>>(new Map())
+  const [minePending, setMinePending] = useState(true)
   const [books, setBooks] = useState<Book[]>([])
   const [f, setF] = useState<any>({ placement: [], shelf_heights: [], visit_result: [] })
   const [answers, setAnswers] = useState<Answers>({})
@@ -106,17 +109,14 @@ export default function Renderer({
 
   // Cached: on shop wifi the last known list beats an empty dropdown, and the
   // network answer replaces it as soon as it lands.
-  const cachedStores = useCached<Store[]>('stores', '/api/stores')
-  const cachedDue = useCached<Store[]>('stores-reja', '/api/stores?reja=1')
   const cachedMine = useCached<Store[]>('stores-menga', '/api/stores?menga=1')
   const cachedBooks = useCached<Book[]>('books', '/api/books')
 
-  useEffect(() => { if (cachedStores.data) setStores(cachedStores.data) }, [cachedStores.data])
-  useEffect(() => { if (cachedMine.data) setMine(cachedMine.data) }, [cachedMine.data])
-  useEffect(() => { if (cachedBooks.data) setBooks(cachedBooks.data) }, [cachedBooks.data])
   useEffect(() => {
-    if (cachedDue.data) setDue(new Map(cachedDue.data.map((s) => [s.id, s.kun_otdi ?? 0])))
-  }, [cachedDue.data])
+    if (cachedMine.data) { setMine(cachedMine.data); setMinePending(false) }
+    else if (cachedMine.error) setMinePending(false)
+  }, [cachedMine.data, cachedMine.error])
+  useEffect(() => { if (cachedBooks.data) setBooks(cachedBooks.data) }, [cachedBooks.data])
 
   useEffect(() => {
     if (!preview) {
@@ -137,11 +137,14 @@ export default function Renderer({
   }
 
   const tookOrder = f.visit_result.includes('Buyurtma oldim')
+  // planned days first (the query already orders that way), then the ones most
+  // overdue, so the shop that most needs a visit is never buried
   const sorted = useMemo(
-    () => [...stores].sort((a, b) => (due.get(b.id) ?? -1) - (due.get(a.id) ?? -1)),
-    [stores, due],
+    () => [...mine].sort((a, b) =>
+      Number(!!b.reja_sana) - Number(!!a.reja_sana) || (b.kun_otdi ?? 0) - (a.kun_otdi ?? 0)),
+    [mine],
   )
-  const chosenStore = stores.find((s) => String(s.id) === String(f.store_id))
+  const chosenStore = mine.find((s) => String(s.id) === String(f.store_id))
 
   /** Exactly the body POST /api/visits will receive — so the client checks the same thing. */
   const body = () => ({
@@ -274,44 +277,38 @@ export default function Renderer({
 
     switch (b.coreKey) {
       case 'store_id': {
-        // The plan decides what this opens on. It does not decide what may be
-        // filed: a manager standing in a shop nobody planned still has to be
-        // able to log the visit, and the database has allowed any shop since
-        // db/16. So the plan is the default, not a gate.
-        const usingMine = onlyMine && mine.length > 0
-        const list = usingMine ? mine : sorted
+        // Only the shops assigned to this person. db/25 made that the rule in
+        // the database too, so there is nothing to fall back to: an empty list
+        // is a shop assignment that has not been made, and saying so is more
+        // use than a dropdown of 661 shops none of which would be accepted.
+        const overdue = (st: Store) => (st.kun_otdi ?? 0) >= (st.visit_every_days ?? 14)
         return wrap(
           <>
             <label htmlFor="store">{b.title}{star}</label>
-            <select id="store" disabled={preview} value={f.store_id ?? ''}
+            <select id="store" disabled={preview || (!preview && mine.length === 0)}
+              value={f.store_id ?? ''}
               onChange={(e) => setF((x: any) => ({ ...x, store_id: e.target.value }))}>
               <option value="">— tanlang —</option>
-              {list.map((s) => (
+              {sorted.map((s) => (
                 <option key={s.id} value={s.id}>
-                  {usingMine
-                    ? `${s.bajarildi ? '✓ ' : ''}${s.code}${planLabel(s) ? ` — ${planLabel(s)}` : ''}`
-                    : `${due.has(s.id) ? '● ' : ''}${s.code}`}
+                  {s.bajarildi ? '✓ ' : overdue(s) ? '● ' : ''}{s.code}
+                  {planLabel(s) ? ` — ${planLabel(s)}` : ''}
                 </option>
               ))}
             </select>
-            {mine.length > 0 && (
-              <button type="button" className="btn btn-ghost btn-sm" style={{ marginTop: 8 }}
-                disabled={preview} onClick={() => setOnlyMine((v) => !v)}>
-                {usingMine
-                  ? `Hamma do'konlar (${stores.length})`
-                  : `Menga biriktirilganlar (${mine.length})`}
-              </button>
-            )}
             <p className="hint">
-              {usingMine
-                ? "Shu hafta sizga biriktirilgan do'konlar · ✓ borilgan"
-                : mine.length === 0
-                  ? "Sizga do'kon biriktirilmagan — hamma do'konlar ko'rsatilyapti"
-                  : chosenStore
-                    ? due.has(chosenStore.id)
-                      ? `● ${due.get(chosenStore.id) === 999 ? 'hali borilmagan' : due.get(chosenStore.id) + ' kun oldin borilgan'}`
-                      : 'yaqinda borilgan'
-                    : "● belgisi — borish vaqti kelgan do'konlar"}
+              {preview
+                ? "Sizga biriktirilgan do'konlar"
+                : minePending
+                  ? 'Yuklanmoqda…'
+                  : mine.length === 0
+                    ? "Sizga hali do'kon biriktirilmagan — rahbaringizga ayting"
+                    : chosenStore
+                      ? `${chosenStore.hudud ?? ''}${chosenStore.hudud ? ' · ' : ''}${
+                          (chosenStore.kun_otdi ?? 999) === 999
+                            ? 'hali borilmagan'
+                            : `${chosenStore.kun_otdi} kun oldin borilgan`}`
+                      : `${mine.length} ta do'kon · ● borish vaqti kelgan · ✓ borilgan`}
             </p>
           </>,
         )

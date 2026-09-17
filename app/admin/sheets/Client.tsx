@@ -92,8 +92,12 @@ export default function SheetsClient() {
     const j = await r.json()
     setBusy(false)
     load()
+    // `wrote` is one entry per tab now: the master tab and one per region
+    const tabs = Object.entries((j.wrote ?? {}) as Record<string, number>)
+    const rows = tabs.length ? Math.max(...tabs.map(([, n]) => n)) : 0
     setMsg(r.ok
-      ? { t: 'ok', m: `Yuborildi — ${j.wrote.vizitlar} ta vizit` }
+      ? { t: 'ok', m: `Yuborildi — ${rows} ta vizit, ${tabs.length} ta varaq (${
+          tabs.map(([t]) => t).join(', ')})` }
       : { t: 'err', m: j.error })
   }
 
@@ -143,16 +147,20 @@ export default function SheetsClient() {
 
       <div className="card">
         <p style={{ marginTop: 0 }}>
-          {info?.sheet?.gid ? 'Havoladagi varaq' : <><b>vizitlar</b> varag&apos;i</>} to&apos;liq qayta yoziladi:
+          {info?.sheet?.gid ? 'Havoladagi varaq' : <><b>vizitlar</b> varag&apos;i</>} — barcha
+          vizitlar, va <b>har bir viloyat uchun alohida varaq</b> to&apos;liq qayta yoziladi:
         </p>
         <ul style={{ color: 'var(--muted)', lineHeight: 1.9, marginTop: 0 }}>
           <li>har bir vizit — bitta qator, eng yangisi pastda</li>
           <li>formadagi har bir savol — alohida ustun, savolning o&apos;z nomi bilan</li>
           <li>kitoblar, rasm havolalari, GPS va vizit havolasi ham</li>
+          <li>viloyat varaqlari: Toshkent shahri, Farg&apos;ona, Samarqand… — do&apos;kon
+            kodining birinchi ikki raqamidan aniqlanadi</li>
         </ul>
         <p className="hint">
-          Barcha xodimlarning vizitlari yuboriladi. Varaqda boshqa ma&apos;lumot bo&apos;lsa,
-          ustiga yozilmaydi — bo&apos;sh varaq havolasini qo&apos;ying.
+          Barcha xodimlarning vizitlari yuboriladi. Viloyat varag&apos;i birinchi vizit
+          kelganda o&apos;zi yaratiladi. Varaqda boshqa ma&apos;lumot bo&apos;lsa, ustiga
+          yozilmaydi — o&apos;sha varaq o&apos;tkazib yuboriladi.
         </p>
         <button className="btn" disabled={busy || !info?.configured} onClick={sync}>
           {busy ? 'Yuborilmoqda…' : 'Jadvalga yuborish'}

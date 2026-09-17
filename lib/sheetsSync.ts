@@ -1,6 +1,6 @@
 import { sql } from 'drizzle-orm'
 import { asSystem, type Tx } from '@/lib/db'
-import { writeVisitsSheet, isConfigured, SheetsNotConfigured } from '@/lib/sheets'
+import { writeVisitTabs, masterTabTitle, isConfigured, SheetsNotConfigured } from '@/lib/sheets'
 import { questionColumns } from '@/lib/form/export'
 import { answerText, type AnswerValue } from '@/lib/form/answers'
 import type { CoreKey, FormDoc, QuestionBlock } from '@/lib/form/types'
@@ -13,6 +13,12 @@ import type { CoreKey, FormDoc, QuestionBlock } from '@/lib/form/types'
  * question's own title. The 16 original questions live in typed columns on
  * `visits`, the admin-added ones in visit_answers; both become ordinary
  * columns here, followed by any removed question that still has answers.
+ *
+ * Since db/25 that sheet is written once per region as well: the same header
+ * and the same rows, split by the region of the shop each visit was filed
+ * against, so a region head opens their own tab instead of filtering 600 rows.
+ * The master tab still holds every visit — splitting a sheet is only useful if
+ * nothing stops being visible somewhere.
  *
  * Decisions worth not re-litigating:
  *
@@ -56,8 +62,13 @@ function coreCell(key: CoreKey, v: any, base: string): Cell {
   }
 }
 
-/** The whole visits tab, header first. Exported so it can be checked without Google. */
-export async function buildVisitSheet(db: Tx): Promise<Cell[][]> {
+export type VisitTab = { title: string; rows: Cell[][] }
+
+/**
+ * The whole visits tab, header first, plus the same thing split by region.
+ * Exported so it can be checked without Google.
+ */
+export async function buildVisitSheet(db: Tx): Promise<{ master: Cell[][]; regions: VisitTab[] }> {
   const base = (process.env.APP_PUBLIC_URL ?? '').trim().replace(/\/+$/, '')
 
   const versions = (await db.execute(sql`
@@ -66,6 +77,7 @@ export async function buildVisitSheet(db: Tx): Promise<Cell[][]> {
 
   const visits = (await db.execute(sql`
     select v.id, to_char(v.visited_at, 'YYYY-MM-DD HH24:MI') vaqt, u.full_name manager,
+           g.name hudud, g.sort hudud_sort,
            s.code dokon, v.width_m, v.height_m,
            to_char(v.open_from, 'HH24:MI') open_from, to_char(v.open_to, 'HH24:MI') open_to,
            v.placement, v.facing::text facing, v.shelf_heights, v.visit_result,
@@ -79,6 +91,7 @@ export async function buildVisitSheet(db: Tx): Promise<Cell[][]> {
       from visits v
       join users u on u.id = v.manager_id
       join stores s on s.id = v.store_id
+      left join regions g on g.code = s.region_code
      -- oldest first, like a Forms response sheet: a new visit lands at the bottom
      order by v.visited_at, v.id`)).rows as any[]
 
@@ -103,21 +116,36 @@ export async function buildVisitSheet(db: Tx): Promise<Cell[][]> {
     byVisit.get(a.visit_id)!.set(a.block_key, a.value)
   }
 
-  const header: Cell[] = [VISITS_MARK, 'Menejer', ...inForm.map((q) => q.title),
+  const header: Cell[] = [VISITS_MARK, 'Menejer', 'Hudud', ...inForm.map((q) => q.title),
     ...archived.map((q) => q.title), 'GPS', 'Vizit havolasi']
+  const byRegion = new Map<string, { sort: number; rows: Cell[][] }>()
   const rows = visits.map((v) => {
     const mine = byVisit.get(v.id)
     const answer = (q: QuestionBlock): Cell =>
       q.coreKey ? coreCell(q.coreKey, v, base) : answerText(q, mine?.get(q.id) ?? null)
-    return [
-      v.vaqt, v.manager,
+    const row: Cell[] = [
+      v.vaqt, v.manager, v.hudud ?? '',
       ...inForm.map(answer),
       ...archived.map(answer),
       v.lat !== null && v.lng !== null ? `${Number(v.lat)}, ${Number(v.lng)}` : '',
       base ? `${base}/vizit/${v.id}` : v.id,
     ]
+    // A region gets a tab once it has a visit — fourteen empty tabs on a fresh
+    // spreadsheet would be noise, and the tab appears the moment it is earned.
+    // A shop with no region (no location in the sheet yet) has no tab to go in,
+    // so its visit lives in the master tab alone rather than being dropped.
+    if (v.hudud) {
+      if (!byRegion.has(v.hudud)) byRegion.set(v.hudud, { sort: v.hudud_sort, rows: [] })
+      byRegion.get(v.hudud)!.rows.push(row)
+    }
+    return row
   })
-  return [header, ...rows]
+
+  const regions = [...byRegion.entries()]
+    .sort((a, b) => a[1].sort - b[1].sort)
+    .map(([title, r]) => ({ title, rows: [header, ...r.rows] }))
+
+  return { master: [header, ...rows], regions }
 }
 
 /** Say the spreadsheet is behind. Cheap, and safe to call from a request. */
@@ -156,8 +184,18 @@ export async function runSheetsSync(): Promise<SyncResult> {
 
   try {
     const sheet = await asSystem(buildVisitSheet)
-    const out = await writeVisitsSheet(sheet, VISITS_MARK)
-    const wrote: Record<string, number> = { vizitlar: out.rows }
+    // the master tab keeps its configured name; the region tabs are named after
+    // the region, and a name collision between the two simply means one write
+    const master = await masterTabTitle()
+    const tabs = [
+      { title: master, rows: sheet.master },
+      ...sheet.regions.filter((r) => r.title !== master),
+    ]
+    const out = await writeVisitTabs(tabs, VISITS_MARK)
+    const wrote = out.wrote
+    if (out.skipped.length) {
+      console.warn('[sheets] boshqa ma\'lumot bor, yozilmadi:', out.skipped.join(', '))
+    }
 
     await asSystem((db) => db.execute(sql`
       update sheets_sync

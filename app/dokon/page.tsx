@@ -21,13 +21,16 @@ export default async function Stores({ searchParams }: { searchParams: Promise<P
   const { rows, canEdit } = await asUser(me, async (db) => {
     const r = await db.execute(sql`
       select s.id, s.code, s.name, s.territory, s.store_type, s.grade, s.agent, s.visit_every_days,
+             g.name viloyat, u.full_name egasi,
              count(v.id) visits,
              max(v.visited_at) last_visit,
              date_part('day', now() - max(v.visited_at))::int kun_otdi
         from stores s
+        left join regions g on g.code = s.region_code
+        left join users u on u.id = s.owner_id
         left join visits v on v.store_id = s.id
        where s.active
-       group by s.id
+       group by s.id, g.name, u.full_name
        -- most overdue first: the list is a work queue, not an alphabet
        order by (max(v.visited_at) is null) desc, max(v.visited_at) asc, s.code`)
     const admin = await db.execute(sql`select can_manage_users() ok`)
@@ -58,7 +61,7 @@ export default async function Stores({ searchParams }: { searchParams: Promise<P
         <table>
           <thead>
             <tr>
-              <th>Kod</th><th>Nomi</th><th>Hudud</th><th>Turi</th>
+              <th>Kod</th><th>Nomi</th><th>Viloyat</th><th>Kim</th><th>Hudud</th><th>Turi</th>
               <th className="txt">Toifa</th><th className="txt">Agent</th>
               <th>Vizit</th><th className="txt">Oxirgi</th><th>Kun</th>
             </tr>
@@ -70,6 +73,14 @@ export default async function Stores({ searchParams }: { searchParams: Promise<P
                 <tr key={s.id}>
                   <td data-label="Kod"><Link href={`/dokon/${s.id}`}>{s.code}</Link></td>
                   <td data-label="Nomi">{s.name}</td>
+                  {/* no region means no location in the sheet yet, or abroad */}
+                  <td data-label="Viloyat" className={s.viloyat ? '' : 'overdue'}>
+                    {s.viloyat ?? 'hududsiz'}
+                  </td>
+                  {/* who files visits for it: no name here means nobody can */}
+                  <td data-label="Kim" className={s.egasi ? '' : 'overdue'}>
+                    {s.egasi ?? 'biriktirilmagan'}
+                  </td>
                   <td data-label="Hudud">{s.territory ?? '—'}</td>
                   <td data-label="Turi">{s.store_type ?? '—'}</td>
                   <td data-label="Toifa">{s.grade ?? '—'}</td>
