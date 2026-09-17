@@ -124,7 +124,22 @@ export default function MmlClient() {
   const [hudud, setHudud] = useState('')
   const [turi, setTuri] = useState('')
 
-  const loadAll = () => fetch('/api/mml').then((r) => r.json()).then(setData)
+  const [loadErr, setLoadErr] = useState('')
+
+  /**
+   * A rejected fetch here used to leave the page on "Yuklanmoqda…" forever,
+   * because `data` stayed null and nothing ever said why. On a shop's phone,
+   * and on a server whose database is down, that is the difference between
+   * "the page is broken" and a sentence naming what failed.
+   */
+  const loadAll = () =>
+    fetch('/api/mml')
+      .then(async (r) => {
+        if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error ?? `MML yuklanmadi (${r.status})`)
+        return r.json()
+      })
+      .then((j) => { setData(j); setLoadErr('') })
+      .catch((e) => setLoadErr(e instanceof Error ? e.message : 'Ulanib bo‘lmadi'))
   useEffect(() => { loadAll() }, [])
 
   async function loadDetail(id: number) {
@@ -179,7 +194,18 @@ export default function MmlClient() {
     loadAll()
   }
 
-  if (!data) return <main id="main" className="wrap-wide"><p className="sub">Yuklanmoqda…</p></main>
+  if (!data) {
+    return (
+      <main id="main" className="wrap-wide">
+        {loadErr
+          ? <>
+              <div className="alert err">{loadErr}</div>
+              <button className="btn" onClick={() => { setLoadErr(''); loadAll() }}>Qayta urinish</button>
+            </>
+          : <p className="sub">Yuklanmoqda…</p>}
+      </main>
+    )
+  }
 
   const { stores, books } = data
   const filtering = !!(hudud || turi)
@@ -245,6 +271,59 @@ export default function MmlClient() {
           </div>
         </div>
       )}
+
+      {/*
+        * How the number is arrived at, on the page that shows the number.
+        * Closed by default: it is reference, not something to read every day —
+        * but "why is this shop 60%?" was being asked of people instead of the
+        * screen, and the answer never changes.
+        */}
+      <details className="card" style={{ marginBottom: 18 }}>
+        <summary style={{ cursor: 'pointer', fontWeight: 600 }}>MML qanday hisoblanadi?</summary>
+
+        <p style={{ marginBottom: 6 }}><b>1. Do&apos;kon qaysi ustun bilan o&apos;lchanadi</b></p>
+        <ul style={{ color: 'var(--muted)', lineHeight: 1.8, marginTop: 0 }}>
+          <li>Toifasi <b>A++</b> — <b>Barcha kitoblar (A++)</b>: varaqdagi hamma kitob nomma-nom</li>
+          <li><b>Kitob do&apos;kon</b>, toifasi A+ yoki A — <b>Kitob do&apos;kon (A)</b></li>
+          <li><b>Kitob do&apos;kon</b>, toifasi B — <b>Kitob do&apos;kon (B)</b></li>
+          <li><b>Kitob do&apos;kon</b>, toifasi C yoki belgilanmagan — <b>Kitob do&apos;kon (C)</b></li>
+          <li>Boshqa turdagi do&apos;kon — o&apos;z turi nomidagi ustun</li>
+        </ul>
+
+        <p style={{ marginBottom: 6 }}><b>2. Varaqdagi raqam nimani bildiradi</b></p>
+        <ul style={{ color: 'var(--muted)', lineHeight: 1.8, marginTop: 0 }}>
+          <li><b>1</b> — shu kitob <b>nomma-nom</b> turishi shart</li>
+          <li><b>0,5 / 0,3 / 0,2</b> — kitob <b>turkumidan ulush</b>, qaysi nom bo&apos;lishi muhim emas</li>
+          <li><b>0</b> — bu do&apos;konda kutilmaydi</li>
+        </ul>
+        <p className="hint" style={{ marginTop: 0 }}>
+          Ulushlar qo&apos;shiladi va <b>yuqoriga yaxlitlanadi</b>: 0,3 × 25 ta C kitob = 7,5 → <b>8 ta</b>.
+        </p>
+
+        <p style={{ marginBottom: 6 }}><b>3. Kitob qachon &laquo;bor&raquo; hisoblanadi</b></p>
+        <p className="hint" style={{ marginTop: 0 }}>
+          Shu yerda <b>qo&apos;lda belgilangan</b> bo&apos;lsa — o&apos;sha. Aks holda —
+          <b> oxirgi vizitda</b> javonda ko&apos;rilgan bo&apos;lsa. Undan oldingi vizitlar hisobga olinmaydi,
+          va qo&apos;lda belgilash vizitni o&apos;zgartirmaydi.
+        </p>
+
+        <p style={{ marginBottom: 6 }}><b>4. Foiz</b></p>
+        <pre style={{ background: 'var(--bg2, rgba(0,0,0,.04))', padding: 10, borderRadius: 6,
+                      overflowX: 'auto', marginTop: 0, lineHeight: 1.6 }}>
+{`kerak = nomma-nom kitoblar + ulush maqsadlari
+bor   = topilgan nomma-nom  + har turkumdan eng ko'pi bilan maqsad qadar
+MML % = 100 × bor / kerak`}
+        </pre>
+        <p className="hint" style={{ marginTop: 0 }}>
+          Har bir turkum <b>o&apos;z maqsadida to&apos;xtaydi</b>: 2 ta kerak bo&apos;lgan joyda 5 ta
+          topilsa ham 2 ta sanaladi — shuning uchun MML <b>100% dan oshmaydi</b>.
+          Misol: 1 nomma-nom + (3 ta 0,5 → maqsad 2) + (5 ta 0,2 → maqsad 1) = kerak <b>4</b>.
+        </p>
+        <p className="hint" style={{ marginTop: 6 }}>
+          Do&apos;konga hali borilmagan va qo&apos;lda ham hech nima belgilanmagan bo&apos;lsa, MML
+          <b> &mdash;</b> bo&apos;lib turadi: bu <b>0% emas</b>, <b>hali o&apos;lchanmagan</b> degani.
+        </p>
+      </details>
 
       {err && !open && <div className="alert err">{err}</div>}
 
