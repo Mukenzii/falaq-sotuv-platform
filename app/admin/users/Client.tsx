@@ -1,11 +1,11 @@
 'use client'
 
 import { useEffect, useState } from 'react'
+import { MIN_PASSWORD, normalizeUsername, suggestUsername } from '@/lib/password.shared'
 
 type User = {
   id: string
-  telegram_id: string
-  telegram_username: string | null
+  username: string | null
   full_name: string
   phone: string | null
   role: string
@@ -15,21 +15,29 @@ type User = {
   region_code: string | null
   hudud: string | null
   dokonlar: number
+  has_password: boolean
+  must_change_password: boolean
 }
 
 type Region = { code: string; name: string; dokonlar: number; biriktirilgan: number; xodimlar: string }
 
+/** A password an admin has just set, shown once and never retrievable again. */
+type Issued = { full_name: string; username: string; password: string }
+
 const ROLES = ['direktor', 'sotuv_boshligi', 'hudud_rahbari', 'sotuv_manager']
 const BLANK = {
-  telegram_id: '', full_name: '', phone: '', role: 'sotuv_manager', parent_id: '', region_code: '',
+  username: '', password: '', full_name: '', phone: '', role: 'sotuv_manager',
+  parent_id: '', region_code: '',
 }
 
 export default function UsersClient() {
   const [users, setUsers] = useState<User[]>([])
   const [regions, setRegions] = useState<Region[]>([])
   const [draft, setDraft] = useState(BLANK)
+  const [touchedLogin, setTouchedLogin] = useState(false)
   const [open, setOpen] = useState(false)
   const [msg, setMsg] = useState<{ t: 'ok' | 'err'; m: string } | null>(null)
+  const [issued, setIssued] = useState<Issued | null>(null)
   const [loading, setLoading] = useState(true)
 
   async function load() {
@@ -58,6 +66,22 @@ export default function UsersClient() {
     }
   }
 
+  /**
+   * Reset somebody's password. The answer carries the new one in the clear
+   * because this is the only moment it exists outside a hash — read it to
+   * them, and they are made to replace it when they sign in.
+   */
+  async function resetPassword(u: User) {
+    if (!u.username) { setMsg({ t: 'err', m: 'Avval login bering' }); return }
+    if (!confirm(`${u.full_name} uchun yangi parol yaratilsinmi? Eskisi ishlamay qoladi.`)) return
+    setMsg(null); setIssued(null)
+    const r = await fetch(`/api/users/${u.id}/password`, { method: 'POST' })
+    const j = await r.json().catch(() => ({}))
+    if (!r.ok) { setMsg({ t: 'err', m: j.error ?? 'Xatolik' }); return }
+    setIssued({ full_name: j.full_name, username: j.username, password: j.password })
+    await load()
+  }
+
   async function send(url: string, method: string, body?: unknown) {
     setMsg(null)
     const r = await fetch(url, {
@@ -70,27 +94,71 @@ export default function UsersClient() {
     return true
   }
 
+  // Typing a name fills in a login until the admin types one themselves.
+  function setName(full_name: string) {
+    setDraft((d) => ({
+      ...d, full_name,
+      username: touchedLogin ? d.username : suggestUsername(full_name),
+    }))
+  }
+
+  const canSave = draft.full_name.trim() && draft.username && draft.password.length >= MIN_PASSWORD
+
   return (
     <main id="main" className="wrap-wide">
       <div style={{ display: 'flex', alignItems: 'flex-start', gap: 16, flexWrap: 'wrap' }}>
         <div style={{ flex: 1, minWidth: 200 }}>
           <h1>Xodimlar</h1>
-          <p className="sub">{users.length} ta xodim, rahbari bo'yicha tartiblangan</p>
+          <p className="sub">{users.length} ta xodim, rahbari bo&apos;yicha tartiblangan</p>
         </div>
         <button className="btn" onClick={() => setOpen(!open)}>{open ? 'Bekor qilish' : 'Xodim qo\'shish'}</button>
       </div>
 
       {msg && <div className={`alert ${msg.t}`}>{msg.m}</div>}
 
+      {/* Shown once. Reloading the page loses it, which is the point — after
+          this moment only the hash exists, and a new one has to be issued. */}
+      {issued && (
+        <div className="card" style={{ marginBottom: 18, borderColor: 'var(--green)' }}>
+          <h2 style={{ marginTop: 0 }}>{issued.full_name} uchun yangi parol</h2>
+          <p className="hint" style={{ marginTop: 0 }}>
+            Shu yerda bir marta ko&apos;rsatiladi. Yozib oling yoki xodimga hozir ayting —
+            sahifani yangilasangiz, boshqa ko&apos;rinmaydi.
+          </p>
+          <div className="row" style={{ gap: 24, flexWrap: 'wrap', alignItems: 'center' }}>
+            <div>
+              <div className="lbl">Login</div>
+              <code style={{ fontSize: 18 }}>{issued.username}</code>
+            </div>
+            <div>
+              <div className="lbl">Parol</div>
+              <code style={{ fontSize: 18, letterSpacing: 1 }}>{issued.password}</code>
+            </div>
+            <button className="btn btn-ghost btn-sm" style={{ marginLeft: 'auto' }}
+              onClick={() => navigator.clipboard?.writeText(`${issued.username} / ${issued.password}`)
+                .then(() => setMsg({ t: 'ok', m: 'Nusxa olindi' }), () => {})}>
+              Nusxa olish
+            </button>
+            <button className="btn btn-ghost btn-sm" onClick={() => setIssued(null)}>Yopish</button>
+          </div>
+        </div>
+      )}
+
       {open && (
         <div className="card" style={{ marginBottom: 18 }}>
           <div className="field row">
-            <div><label>Telegram ID</label>
-              <input value={draft.telegram_id} inputMode="numeric"
-                onChange={(e) => setDraft({ ...draft, telegram_id: e.target.value })} /></div>
             <div><label>Ism familiya</label>
               <input type="text" value={draft.full_name}
-                onChange={(e) => setDraft({ ...draft, full_name: e.target.value })} /></div>
+                onChange={(e) => setName(e.target.value)} /></div>
+            <div><label>Login</label>
+              <input type="text" value={draft.username} autoCapitalize="none" spellCheck={false}
+                onChange={(e) => { setTouchedLogin(true); setDraft({ ...draft, username: normalizeUsername(e.target.value) }) }} /></div>
+            <div><label>Boshlang&apos;ich parol</label>
+              {/* Typed, not generated: the admin is usually sitting next to the
+                  person. They have to change it on first sign-in anyway. */}
+              <input type="text" value={draft.password} autoComplete="off"
+                placeholder={`kamida ${MIN_PASSWORD} ta belgi`}
+                onChange={(e) => setDraft({ ...draft, password: e.target.value })} /></div>
           </div>
           <div className="field row">
             <div><label>Telefon</label>
@@ -114,17 +182,22 @@ export default function UsersClient() {
                 ))}
               </select></div>
           </div>
-          <button className="btn" disabled={!draft.telegram_id || !draft.full_name}
+          <button className="btn" disabled={!canSave}
             onClick={async () => {
               const ok = await send('/api/users', 'POST', {
                 ...draft,
-                telegram_id: Number(draft.telegram_id),
                 parent_id: draft.parent_id || null,
                 phone: draft.phone || null,
                 region_code: draft.region_code || null,
               })
-              if (ok) { setDraft(BLANK); setOpen(false); setMsg({ t: 'ok', m: 'Xodim qo\'shildi' }) }
+              if (ok) {
+                setIssued({ full_name: draft.full_name.trim(), username: draft.username, password: draft.password })
+                setDraft(BLANK); setTouchedLogin(false); setOpen(false)
+              }
             }}>Saqlash</button>
+          <p className="hint" style={{ marginBottom: 0 }}>
+            Xodim shu login va parol bilan kiradi va birinchi kirishda parolni o&apos;zi o&apos;zgartiradi.
+          </p>
         </div>
       )}
 
@@ -132,8 +205,8 @@ export default function UsersClient() {
         <table>
           <thead>
             <tr>
-              <th>Ism</th><th>Telegram ID</th><th>Lavozim</th><th>Rahbari</th>
-              <th>Hudud</th><th>Do&apos;konlar</th><th>Holat</th><th />
+              <th>Ism</th><th>Login</th><th>Lavozim</th><th>Rahbari</th>
+              <th>Hudud</th><th>Do&apos;konlar</th><th>Parol</th><th>Holat</th><th />
             </tr>
           </thead>
           <tbody>
@@ -144,11 +217,12 @@ export default function UsersClient() {
                     onBlur={(e) => e.target.value !== u.full_name &&
                       send(`/api/users/${u.id}`, 'PATCH', { full_name: e.target.value })} />
                 </td>
-                <td data-label="Telegram ID">
-                  {/* editable: ids change when someone switches Telegram account */}
-                  <input type="text" defaultValue={u.telegram_id} style={{ width: 130 }}
-                    onBlur={(e) => e.target.value !== u.telegram_id &&
-                      send(`/api/users/${u.id}`, 'PATCH', { telegram_id: Number(e.target.value) })} />
+                <td data-label="Login">
+                  {/* editable: a login can be wrong, or a person can marry */}
+                  <input type="text" defaultValue={u.username ?? ''} style={{ width: 150 }}
+                    autoCapitalize="none" spellCheck={false} placeholder="login yo'q"
+                    onBlur={(e) => e.target.value !== (u.username ?? '') &&
+                      send(`/api/users/${u.id}`, 'PATCH', { username: e.target.value })} />
                 </td>
                 <td data-label="Lavozim">
                   <select value={u.role}
@@ -179,6 +253,15 @@ export default function UsersClient() {
                   <button className="btn btn-ghost btn-sm" disabled={!u.region_code}
                     title="Shu hududdagi barcha do'konlarni shu xodimga biriktirish"
                     onClick={() => assignRegion(u)}>Biriktirish</button>
+                </td>
+                <td data-label="Parol">
+                  {/* "kira olmaydi" is not a warning, it is a fact: an account
+                      with no password cannot be signed in to at all. */}
+                  {!u.has_password && <span className="tag">kira olmaydi</span>}
+                  {u.has_password && u.must_change_password && <span className="tag">vaqtinchalik</span>}
+                  <button className="btn btn-ghost btn-sm" disabled={!u.username}
+                    title={u.username ? 'Yangi parol yaratish' : 'Avval login bering'}
+                    onClick={() => resetPassword(u)}>Parolni tiklash</button>
                 </td>
                 <td data-label="Holat">
                   <button className="btn btn-ghost btn-sm"

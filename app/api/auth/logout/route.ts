@@ -1,6 +1,6 @@
 import { NextResponse } from 'next/server'
 import { headers } from 'next/headers'
-import { NONCE_COOKIE } from '@/lib/loginNonce'
+import { PWCHANGE_COOKIE } from '@/lib/cookies'
 import { SESSION_COOKIE } from '@/lib/session'
 
 /**
@@ -18,6 +18,6 @@ export async function POST() {
   // localhost. Same trap the MinIO presign and the old dev login both hit.
   const res = NextResponse.redirect(host ? `${proto}://${host}/login` : '/login', 303)
   res.cookies.delete(SESSION_COOKIE)
-  res.cookies.delete(NONCE_COOKIE)
+  res.cookies.delete(PWCHANGE_COOKIE)
   return res
 }

@@ -9,7 +9,8 @@ export async function GET() {
 
   const row = await asUser(me, async (db) => {
     const r = await db.execute(sql`
-      select id, full_name, role, telegram_id from users where id = ${me}`)
+      select id, full_name, role, username, must_change_password
+        from users where id = ${me}`)
     return r.rows[0]
   })
   return row ? NextResponse.json(row) : NextResponse.json({ error: 'gone' }, { status: 401 })

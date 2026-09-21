@@ -36,13 +36,29 @@ async function req(path, { as, method = 'GET', body } = {}) {
   const text = await r.text()
   let json
   try { json = JSON.parse(text) } catch { /* html */ }
-  return { status: r.status, json, text }
+  return { status: r.status, json, text, headers: r.headers }
 }
 
 const U = {}
 let STORE_A, STORE_B, ORIGINAL_OWNERS, SOLO_DIREKTOR
 
-before(() => {
+/**
+ * The credentials the sign-in tests use. `password` is rewritten as the tests
+ * reset and change it, so later tests always sign in with whatever the last
+ * one left behind.
+ */
+const LOGIN = { user: 'sinov.manager', password: '' }
+
+/**
+ * Every login the suite creates. The fixture people are found by their
+ * 9000009xx telegram ids, but accounts made through the API have no telegram
+ * id at all any more — without this list they would survive the run and sit in
+ * the real database.
+ */
+const FIXTURE_LOGINS = ["sinov.manager", "yangi.xodim", "hacker.x", "ismsiz", "parolsiz"]
+  .map((u) => `'${u}'`).join(', ')
+
+before(async () => {
   assert.ok(SECRET && !SECRET.startsWith('change_me'), 'SESSION_SECRET must be set in .env')
 
   // This database holds real people now, and an admin deleting a placeholder
@@ -50,7 +66,8 @@ before(() => {
   // depend on any row it did not create itself. Everything below lives in the
   // reserved 9000009xx band and is torn down at the end of the run.
   psql(`delete from visit_books; delete from visits;
-        delete from users where telegram_id between 900000100 and 900000999;`)
+        delete from users where telegram_id between 900000100 and 900000999
+                             or username in (${FIXTURE_LOGINS});`)
 
   // The suite creates and deletes visits in the same database the app pushes to
   // Google Sheets from. Without this, every run would spray its fixtures across
@@ -78,6 +95,11 @@ before(() => {
   U.malika  = add(900000905, 'Sinov Manager A2', 'sotuv_manager',  U.dilshod)
   U.otabek  = add(900000906, 'Sinov Manager B1', 'sotuv_manager',  U.nodira)
 
+  // Sardor is the one the sign-in tests actually sign in as, so he needs a
+  // real login and a real hash. Made through the API rather than typed into
+  // the database, so the test exercises the route an admin uses.
+  psql(`update users set username = '${LOGIN.user}' where id = '${U.sardor}'`)
+
   // borrow two real stores, remembering who owned them so they go back
   const two = psql("select string_agg(id::text, ',' order by id) from (select id from stores where active order by id limit 2) x").split(',')
   ;[STORE_A, STORE_B] = two
@@ -86,6 +108,13 @@ before(() => {
                             from stores where id in (${STORE_A}, ${STORE_B})`).split(',')
   psql(`update stores set owner_id = '${U.sardor}' where id = ${STORE_A};
         update stores set owner_id = '${U.otabek}' where id = ${STORE_B};`)
+
+  // Issue the fixture password through the route an admin actually presses,
+  // rather than writing a hash into the database from here: this way the suite
+  // cannot pass while the reset endpoint is broken.
+  const issued = await req(`/api/users/${U.sardor}/password`, { as: U.komil, method: 'POST' })
+  assert.equal(issued.status, 200, `could not issue a fixture password: ${issued.text}`)
+  LOGIN.password = issued.json.password
 })
 
 // Give the borrowed stores back and take the fixture people away. Runs last,
@@ -96,7 +125,8 @@ after(() => {
           update stores set owner_id = ${ORIGINAL_OWNERS[1]}::uuid where id = ${STORE_B};`)
   }
   psql(`delete from visit_books; delete from visits;
-        delete from users where telegram_id between 900000100 and 900000999;`)
+        delete from users where telegram_id between 900000100 and 900000999
+                             or username in (${FIXTURE_LOGINS});`)
   // let the real data push again, and ask for one so the sheet matches reality
   psql('update sheets_sync set paused = false, dirty = true where id')
 })
@@ -171,41 +201,130 @@ describe('auth', () => {
     assert.equal(r.status, 401)
   })
 
-  test('telegram login accepts a correctly signed payload', async () => {
-    const { createHash } = await import('node:crypto')
-    const d = { auth_date: Math.floor(Date.now() / 1000), first_name: 'Komil', id: 6604196370 }
-    const check = Object.keys(d).sort().map((k) => `${k}=${d[k]}`).join('\n')
-    const secret = createHash('sha256').update(process.env.TELEGRAM_BOT_TOKEN).digest()
-    d.hash = createHmac('sha256', secret).update(check).digest('hex')
-    const r = await req('/api/auth/telegram', { method: 'POST', body: d })
-    assert.equal(r.status, 200)
-    assert.equal(r.json.role, 'direktor')
+  test('signing in with a login and password works', async () => {
+    const r = await req('/api/auth/login', {
+      method: 'POST', body: { login: LOGIN.user, password: LOGIN.password },
+    })
+    assert.equal(r.status, 200, r.text)
+    assert.equal(r.json.ok, true)
+    assert.match(r.headers.get('set-cookie') ?? '', /falaq_session=/)
   })
 
-  test('telegram login rejects a tampered hash', async () => {
-    const r = await req('/api/auth/telegram', {
-      method: 'POST',
-      body: { id: 6604196370, auth_date: Math.floor(Date.now() / 1000), hash: 'deadbeef' },
+  test('the login is not case sensitive', async () => {
+    const r = await req('/api/auth/login', {
+      method: 'POST', body: { login: LOGIN.user.toUpperCase(), password: LOGIN.password },
+    })
+    assert.equal(r.status, 200, r.text)
+  })
+
+  test('a wrong password is refused', async () => {
+    const r = await req('/api/auth/login', {
+      method: 'POST', body: { login: LOGIN.user, password: 'butunlay-boshqa' },
     })
     assert.equal(r.status, 401)
+    assert.equal(r.headers.get('set-cookie'), null)
   })
 
-  test('telegram login rejects a replayed old payload', async () => {
-    const { createHash } = await import('node:crypto')
-    const d = { auth_date: Math.floor(Date.now() / 1000) - 90000, first_name: 'B', id: 6604196370 }
-    const check = Object.keys(d).sort().map((k) => `${k}=${d[k]}`).join('\n')
-    const secret = createHash('sha256').update(process.env.TELEGRAM_BOT_TOKEN).digest()
-    d.hash = createHmac('sha256', secret).update(check).digest('hex')
-    assert.equal((await req('/api/auth/telegram', { method: 'POST', body: d })).status, 401)
+  test('an unknown login gets the same answer as a wrong password', async () => {
+    const a = await req('/api/auth/login', { method: 'POST', body: { login: LOGIN.user, password: 'x'.repeat(12) } })
+    const b = await req('/api/auth/login', { method: 'POST', body: { login: 'yoq.odam', password: 'x'.repeat(12) } })
+    assert.equal(a.status, 401)
+    assert.equal(b.status, 401)
+    assert.equal(a.json.error, b.json.error, 'the form must not say which accounts exist')
   })
 
-  test('telegram login rejects an unknown telegram_id', async () => {
-    const { createHash } = await import('node:crypto')
-    const d = { auth_date: Math.floor(Date.now() / 1000), first_name: 'X', id: 111222333 }
-    const check = Object.keys(d).sort().map((k) => `${k}=${d[k]}`).join('\n')
-    const secret = createHash('sha256').update(process.env.TELEGRAM_BOT_TOKEN).digest()
-    d.hash = createHmac('sha256', secret).update(check).digest('hex')
-    assert.equal((await req('/api/auth/telegram', { method: 'POST', body: d })).status, 403)
+  test('a deactivated account cannot sign in even with the right password', async () => {
+    psql(`update users set active = false where id = '${U.sardor}'`)
+    try {
+      const r = await req('/api/auth/login', {
+        method: 'POST', body: { login: LOGIN.user, password: LOGIN.password },
+      })
+      assert.equal(r.status, 403)
+    } finally {
+      psql(`update users set active = true where id = '${U.sardor}'`)
+    }
+  })
+
+  test('the password is never in what the API hands back', async () => {
+    const r = await req('/api/users', { as: U.komil })
+    assert.equal(r.status, 200)
+    assert.ok(!/password_hash|scrypt\$/.test(r.text), 'a hash reached the browser')
+    // has_password is a boolean about it, which is fine and is what the admin
+    // screen shows
+    assert.equal(typeof r.json[0].has_password, 'boolean')
+  })
+
+  test('repeated wrong passwords lock the account, and a reset unlocks it', async () => {
+    for (let i = 0; i < 8; i++) {
+      await req('/api/auth/login', { method: 'POST', body: { login: LOGIN.user, password: 'notit-notit' } })
+    }
+    const locked = await req('/api/auth/login', {
+      method: 'POST', body: { login: LOGIN.user, password: LOGIN.password },
+    })
+    assert.equal(locked.status, 429, 'the right password should still be refused while locked')
+
+    const reset = await req(`/api/users/${U.sardor}/password`, { as: U.komil, method: 'POST' })
+    assert.equal(reset.status, 200, reset.text)
+    LOGIN.password = reset.json.password
+
+    const after = await req('/api/auth/login', {
+      method: 'POST', body: { login: LOGIN.user, password: LOGIN.password },
+    })
+    assert.equal(after.status, 200, after.text)
+    assert.equal(after.json.next, '/parol', 'a reset password has to be replaced on arrival')
+  })
+
+})
+
+describe("passwords are an administrator's job", () => {
+  test("a manager cannot reset somebody else's password", async () => {
+    const r = await req(`/api/users/${U.malika}/password`, { as: U.sardor, method: 'POST' })
+    assert.equal(r.status, 403)
+  })
+
+  test('a manager cannot make their own account an admin', async () => {
+    const r = await req(`/api/users/${U.sardor}`, {
+      as: U.sardor, method: 'PATCH', body: { role: 'direktor' },
+    })
+    assert.ok([403, 409].includes(r.status), `got ${r.status}: ${r.text}`)
+    assert.equal(psql(`select role from users where id = '${U.sardor}'`), 'sotuv_manager')
+  })
+
+  test("a manager cannot take over somebody else's login", async () => {
+    const r = await req(`/api/users/${U.sardor}`, {
+      as: U.sardor, method: 'PATCH', body: { username: 'sinov.boshqa' },
+    })
+    assert.ok([403, 409].includes(r.status), `got ${r.status}: ${r.text}`)
+  })
+
+  test('a manager may still fix their own name', async () => {
+    const r = await req(`/api/users/${U.sardor}`, {
+      as: U.sardor, method: 'PATCH', body: { full_name: 'Sinov Manager A1' },
+    })
+    assert.equal(r.status, 200, r.text)
+  })
+
+  test('changing your own password needs the old one', async () => {
+    const bad = await req('/api/auth/password', {
+      as: U.sardor, method: 'POST', body: { current: 'not-the-one', next: 'yangi-parol-123' },
+    })
+    assert.equal(bad.status, 403)
+
+    const ok = await req('/api/auth/password', {
+      as: U.sardor, method: 'POST', body: { current: LOGIN.password, next: 'yangi-parol-123' },
+    })
+    assert.equal(ok.status, 200, ok.text)
+    LOGIN.password = 'yangi-parol-123'
+
+    // and the flag that forced them here is gone
+    assert.equal(psql(`select must_change_password from users where id = '${U.sardor}'`), 'f')
+  })
+
+  test('a too-short password is refused', async () => {
+    const r = await req('/api/auth/password', {
+      as: U.sardor, method: 'POST', body: { current: LOGIN.password, next: 'qisqa' },
+    })
+    assert.equal(r.status, 400)
   })
 
 })
@@ -290,7 +409,7 @@ describe('user management', () => {
   test('a manager cannot create a user', async () => {
     const r = await req('/api/users', {
       as: U.sardor, method: 'POST',
-      body: { telegram_id: 900000101, full_name: 'Hacker' },
+      body: { username: 'hacker.x', password: 'parol-parol', full_name: 'Hacker' },
     })
     assert.equal(r.status, 403)
   })
@@ -298,27 +417,56 @@ describe('user management', () => {
   test('the direktor can create a user', async () => {
     const r = await req('/api/users', {
       as: U.komil, method: 'POST',
-      body: { telegram_id: 900000102, full_name: 'Yangi Xodim', role: 'sotuv_manager', parent_id: U.dilshod },
+      body: {
+        username: 'yangi.xodim', password: 'parol-parol', full_name: 'Yangi Xodim',
+        role: 'sotuv_manager', parent_id: U.dilshod,
+      },
     })
-    assert.equal(r.status, 201)
+    assert.equal(r.status, 201, r.text)
     assert.equal(r.json.full_name, 'Yangi Xodim')
+    assert.equal(r.json.username, 'yangi.xodim')
   })
 
-  test('a duplicate telegram_id is a conflict, not a crash', async () => {
+  test('a new account can sign in straight away, and must change its password', async () => {
+    const r = await req('/api/auth/login', {
+      method: 'POST', body: { login: 'yangi.xodim', password: 'parol-parol' },
+    })
+    assert.equal(r.status, 200, r.text)
+    assert.equal(r.json.next, '/parol')
+  })
+
+  test('a duplicate login is a conflict, not a crash', async () => {
     const r = await req('/api/users', {
       as: U.komil, method: 'POST',
-      body: { telegram_id: 900000102, full_name: 'Takror' },
+      body: { username: 'YANGI.XODIM', password: 'parol-parol', full_name: 'Takror' },
     })
-    assert.equal(r.status, 409)
+    assert.equal(r.status, 409, 'case must not let a login be taken twice')
   })
 
   test('creating a user without a name is rejected', async () => {
-    const r = await req('/api/users', { as: U.komil, method: 'POST', body: { telegram_id: 900000103 } })
+    const r = await req('/api/users', {
+      as: U.komil, method: 'POST', body: { username: 'ismsiz', password: 'parol-parol' },
+    })
+    assert.equal(r.status, 400)
+  })
+
+  test('creating a user without a password is rejected', async () => {
+    const r = await req('/api/users', {
+      as: U.komil, method: 'POST', body: { username: 'parolsiz', full_name: 'Parolsiz' },
+    })
+    assert.equal(r.status, 400)
+  })
+
+  test('a login with a space in it is rejected', async () => {
+    const r = await req('/api/users', {
+      as: U.komil, method: 'POST',
+      body: { username: 'bir ikki', password: 'parol-parol', full_name: 'Bosh joy' },
+    })
     assert.equal(r.status, 400)
   })
 
   test('the direktor can rename someone', async () => {
-    const id = psql("select id from users where telegram_id = 900000102")
+    const id = psql("select id from users where username = 'yangi.xodim'")
     const r = await req(`/api/users/${id}`, { as: U.komil, method: 'PATCH', body: { full_name: 'Nomi O\'zgardi' } })
     assert.equal(r.status, 200)
     assert.equal(r.json.full_name, "Nomi O'zgardi")
@@ -345,7 +493,7 @@ describe('user management', () => {
   })
 
   test('the direktor can delete a user who has no visits', async () => {
-    const id = psql("select id from users where telegram_id = 900000102")
+    const id = psql("select id from users where username = 'yangi.xodim'")
     assert.equal((await req(`/api/users/${id}`, { as: U.komil, method: 'DELETE' })).status, 200)
   })
 })
@@ -1206,63 +1354,6 @@ describe('responses survive schema edits', () => {
   test('the live form no longer asks it', async () => {
     const r = await req('/api/form', { as: U.sardor })
     assert.ok(!r.json.doc.sections.flatMap((s) => s.blocks).some((b) => b.id === KEEP))
-  })
-})
-
-describe('joining without anyone typing a telegram id', () => {
-  const TG = 555000111
-  const clean = () => psql(
-    `delete from users where telegram_id in (${TG}, 555000222);
-     delete from join_requests where telegram_id in (${TG}, 555000222)`)
-
-  before(clean)
-  after(clean)
-
-  test('an admin sees a waiting request, a manager sees none', async () => {
-    // exactly the row the bot writes when an unknown account messages it
-    psql(`insert into join_requests (telegram_id, username, display_name)
-          values (${TG}, 'yangi_odam', 'Yangi Odam')`)
-
-    const mine = await req('/api/join-requests', { as: U.komil })
-    assert.equal(mine.status, 200)
-    assert.ok(mine.json.some((r) => String(r.telegram_id) === String(TG)))
-
-    const theirs = await req('/api/join-requests', { as: U.sardor })
-    assert.deepEqual(theirs.json, [])
-  })
-
-  test('a sotuv_manager cannot approve anyone', async () => {
-    const r = await req(`/api/join-requests/${TG}`, {
-      as: U.sardor, method: 'POST', body: { full_name: 'O\'zim', role: 'direktor' },
-    })
-    // RLS hides the request from them, so it reads as "no such request"
-    assert.ok([403, 404].includes(r.status), `got ${r.status}`)
-    assert.equal(psql(`select count(*) from users where telegram_id = ${TG}`), '0')
-  })
-
-  test('approving turns the request into a user and consumes it', async () => {
-    const r = await req(`/api/join-requests/${TG}`, {
-      as: U.komil, method: 'POST', body: { full_name: 'Yangi Odam', role: 'sotuv_manager' },
-    })
-    assert.equal(r.status, 201)
-    assert.equal(r.json.full_name, 'Yangi Odam')
-    assert.equal(String(r.json.telegram_id), String(TG))
-    assert.equal(psql(`select count(*) from join_requests where telegram_id = ${TG}`), '0')
-  })
-
-  test('approving the same request twice is a 404, not a second user', async () => {
-    const r = await req(`/api/join-requests/${TG}`, {
-      as: U.komil, method: 'POST', body: { full_name: 'Yana' },
-    })
-    assert.equal(r.status, 404)
-    assert.equal(psql(`select count(*) from users where telegram_id = ${TG}`), '1')
-  })
-
-  test('a request can be dismissed without creating anyone', async () => {
-    psql(`insert into join_requests (telegram_id, display_name) values (555000222, 'Kerakmas')`)
-    const r = await req('/api/join-requests/555000222', { as: U.komil, method: 'DELETE' })
-    assert.equal(r.status, 200)
-    assert.equal(psql("select count(*) from users where telegram_id = 555000222"), '0')
   })
 })
 
@@ -2443,71 +2534,5 @@ describe('the main screen counts your own plan', () => {
     const html = await home(U.sardor)
     assert.match(html, /<em>1(<!-- -->)? ta<\/em>/)
     assert.match(html, /2 ta do&#x27;kon biriktirilgan, 1 tasiga borildi/)
-  })
-})
-
-describe('signing in a second time, and on a second device', () => {
-  let TG
-  const mk = (nonce, { bot = true, age = '0 minutes' } = {}) => psql(`
-    insert into login_tokens (nonce, telegram_id, claimed_at, bot_issued, created_at)
-    values ('${nonce}', ${TG}, now(), ${bot}, now() - interval '${age}')`)
-  const open = async (t) => {
-    const r = await fetch(`${BASE}/kirish?t=${t}`, { redirect: 'manual' })
-    const cookie = /(falaq_session=[^;]+)/.exec(r.headers.get('set-cookie') ?? '')?.[1] ?? null
-    return { status: r.status, to: r.headers.get('location'), cookie }
-  }
-  const clean = () => psql(`delete from login_tokens where nonce like 'dd%' or nonce like 'ee%'`)
-
-  before(() => {
-    TG = psql(`select telegram_id from users where id = '${U.sardor}'`)
-    clean()
-  })
-  after(clean)
-
-  test('the link the bot sends signs you in', async () => {
-    const t = 'dd'.repeat(16)
-    mk(t)
-    const r = await open(t)
-    assert.equal(r.status, 303)
-    assert.equal(r.to, '/', 'a relative location, or a phone is sent to localhost')
-    assert.ok(r.cookie, 'no session was handed out')
-    // and that session really is that person
-    const me = await fetch(`${BASE}/api/me`, { headers: { cookie: r.cookie } })
-    assert.equal(me.status, 200)
-    assert.equal((await me.json()).id, U.sardor)
-  })
-
-  test('the same link a second time does not', async () => {
-    const r = await open('dd'.repeat(16))
-    assert.equal(r.to, '/login?eskirgan=1')
-    assert.equal(r.cookie, null)
-  })
-
-  test('a browser-flow nonce cannot be traded for a session here', async () => {
-    const t = 'ee'.repeat(16)
-    mk(t, { bot: false })
-    const r = await open(t)
-    assert.equal(r.cookie, null, 'a cookie-bound nonce was accepted by the bot link route')
-  })
-
-  test('a link older than ten minutes is refused', async () => {
-    const t = 'dd' + 'ee'.repeat(15)
-    mk(t, { age: '11 minutes' })
-    assert.equal((await open(t)).cookie, null)
-  })
-
-  test('the phone and the laptop can be signed in at the same time', async () => {
-    const a = 'dd0' + 'd'.repeat(29)
-    const b = 'dd1' + 'd'.repeat(29)
-    mk(a); mk(b)
-    const phone = await open(a)
-    const laptop = await open(b)
-    assert.ok(phone.cookie && laptop.cookie)
-    // neither sign-in ended the other: the cookie carries the user, not a
-    // server-side session that a later login could replace
-    for (const [what, c] of [['phone', phone.cookie], ['laptop', laptop.cookie]]) {
-      const r = await fetch(`${BASE}/api/me`, { headers: { cookie: c } })
-      assert.equal(r.status, 200, `${what} was signed out by the other device`)
-    }
   })
 })

@@ -11,10 +11,6 @@ WORKDIR /app
 COPY --from=deps /app/node_modules ./node_modules
 COPY . .
 
-# NEXT_PUBLIC_* is inlined into the client bundle at build time, so the bot
-# username has to be known here, not at run time.
-ARG NEXT_PUBLIC_TELEGRAM_BOT_USERNAME=""
-ENV NEXT_PUBLIC_TELEGRAM_BOT_USERNAME=$NEXT_PUBLIC_TELEGRAM_BOT_USERNAME
 ENV NEXT_TELEMETRY_DISABLED=1
 
 # Not `npm run build` — that script points distDir at .next-build so a local

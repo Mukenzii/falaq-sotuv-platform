@@ -8,8 +8,15 @@ export const visit_facing = pgEnum("visit_facing", ['face', 'qisman_face', 'kore
 
 export const users = pgTable("users", {
 	id: uuid().defaultRandom().primaryKey().notNull(),
-	// You can use { mode: "bigint" } if numbers are exceeding js number limitations
-	telegram_id: bigint({ mode: "number" }).notNull(),
+	username: text(),
+	password_hash: text(),
+	must_change_password: boolean().default(false).notNull(),
+	password_set_at: timestamp({ withTimezone: true, mode: 'string' }),
+	failed_logins: integer().default(0).notNull(),
+	locked_until: timestamp({ withTimezone: true, mode: 'string' }),
+	// A note, not an identity, since db/29. You can use { mode: "bigint" } if
+	// numbers are exceeding js number limitations
+	telegram_id: bigint({ mode: "number" }),
 	telegram_username: text(),
 	full_name: text().notNull(),
 	phone: text(),
@@ -26,6 +33,8 @@ export const users = pgTable("users", {
 			name: "users_parent_id_fkey"
 		}).onDelete("set null"),
 	unique("users_telegram_id_key").on(table.telegram_id),
+	// users_username_key is unique on lower(username), which drizzle-kit cannot
+	// express; db/01 and db/29 create it.
 	unique("users_phone_key").on(table.phone),
 	unique("users_email_key").on(table.email),
 	pgPolicy("u_delete", { as: "permissive", for: "delete", to: ["public"], using: sql`(can_manage_users() AND (id <> current_user_id()))` }),

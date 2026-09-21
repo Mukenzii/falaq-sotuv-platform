@@ -2,7 +2,8 @@
 
 Field managers record bookstore visits from a phone. The office tracks the
 weekly round, the must-have assortment (MML), and pushes everything to Google
-Sheets. Sign-in is a Telegram bot — there are no passwords in the system.
+Sheets. Sign-in is a login and a password, and accounts exist only because an
+administrator made one.
 
 ## Deploying
 
@@ -93,18 +94,31 @@ All four services report `healthy`. Then open **https://sotuv.falaq.uz**.
 
 ### 5. The first sign-in
 
-A fresh install has exactly **one** user: the direktor in `db/03_seed.sql`.
-Change the telegram id there before the first start if it should be somebody
-else. Everyone after that joins the real way — they press START in
-`@falaqreaderbot`, a request appears on `/admin/sozlash`, and an admin approves
-it. No telegram id is ever typed by hand.
+A fresh install has exactly **one** user: the direktor in `db/03_seed.sql`, and
+that row has **no password**, so nobody can sign in yet. A password written
+into a file in the repository is a password everybody has, so the first one is
+set by hand, once, on the server:
 
-There is deliberately no back door. If the seeded account is wrong and the
-database is already running:
+    docker compose -f docker-compose.prod.yml --env-file .env.prod exec -T app \
+      npx tsx scripts/set-password.mjs komil '<parol>'
 
-    docker compose -f docker-compose.prod.yml --env-file .env.prod exec -T db \
-      psql -U falaq_owner -d falaq \
-      -c "update users set telegram_id = <id> where role = 'direktor';"
+On a database that predates logins — where everybody still has a `telegram_id`
+and nobody has a username — name the person as well, and they get both:
+
+    ... npx tsx scripts/set-password.mjs komil '<parol>' Komil
+
+`--list` prints everybody and whether they can sign in. Add `--temporary` to
+make them choose a new password on arrival; the first direktor deliberately is
+not forced to, because there is nobody to reset it for them if they get stuck.
+
+Everyone after that is created by the direktor on **/admin/users**: a name, a
+login, a starting password. They are made to replace that password the first
+time they sign in. There is no sign-up, no email, and no "forgot my password" —
+somebody locked out asks an admin, who presses **Parolni tiklash** and reads
+them the new one. It is shown once and never again.
+
+There is deliberately no back door. Eight wrong passwords lock an account for
+fifteen minutes; a reset clears the lock.
 
 ### 6. Google Sheets
 
@@ -173,7 +187,8 @@ other projects on the server.
 - PostgreSQL 16, self-hosted — hierarchy enforced by RLS in the database
 - Drizzle ORM, always via `asUser()` in `lib/db.ts`
 - MinIO for shelf photos, presigned uploads
-- Telegram bot login, no passwords and no registered domain needed
+- Login and password, scrypt from `node:crypto` — no auth dependency, no
+  identity provider, no registered domain needed
 
 ## Why compose and not Kubernetes
 
@@ -270,10 +285,16 @@ Consequences worth knowing:
 - `npm test` republishes the form while it runs and puts it back in an `after`
   hook. It also clears every visit — re-run `scripts/demo-data.sql` afterwards.
 
-## Changing people and tokens
+## Changing people
 
-- Bot token and the bootstrap admin id live in `.env` only.
-- Everything else — telegram ids, names, roles, who reports to whom — is edited
-  in the admin panel. `db/03_seed.sql` holds placeholder people with fake
-  `9000000xx` ids; only Komil's id is real.
+- Names, logins, roles, who reports to whom, and passwords are all edited in
+  the admin panel, on `/admin/users`.
+- `db/03_seed.sql` holds the bootstrap direktor and nobody else. It is guarded
+  on "no direktor exists yet", so replaying `db:load` against a live database
+  does not create a second one.
+- Passwords are never readable, only replaceable: the database stores an scrypt
+  hash (`lib/password.ts`), and a new password exists in the clear for exactly
+  the one response that hands it to the admin.
+- `users.telegram_id` is still there as a note of who somebody used to be in
+  the bot. Nothing reads it.
 
