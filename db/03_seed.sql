@@ -10,7 +10,7 @@
 -- repository is a password everybody has, so the first one is set once, by
 -- hand, on the machine that runs the database:
 --
---   npx tsx scripts/set-password.mjs komil '<parol>'
+--   node scripts/set-password.mjs komil '<parol>'
 --
 -- After that Komil signs in at /login and creates everybody else.
 --
@@ -25,7 +25,7 @@
 -- match it, and a plain insert would quietly create a second Komil. Give the
 -- existing one a login with the same script instead:
 --
---   npx tsx scripts/set-password.mjs komil '<parol>' Komil
+--   node scripts/set-password.mjs komil '<parol>' Komil
 
 insert into users (username, full_name, role, parent_id, active)
 select 'komil', 'Komil', 'direktor', null, true

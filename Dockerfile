@@ -27,6 +27,20 @@ COPY --from=build /app/public ./public
 COPY --from=build --chown=nextjs:nodejs /app/.next/standalone ./
 COPY --from=build --chown=nextjs:nodejs /app/.next/static ./.next/static
 
+# The first account cannot be made from the web app — making one needs an
+# account — so the one script that breaks that circle has to be in here. It is
+# plain ESM importing plain ESM, and pg is already in the traced node_modules
+# that standalone brought with it, so this runs under `node` with nothing else
+# installed:
+#
+#   docker compose ... exec -T app node scripts/set-password.mjs komil '<parol>' Komil
+#
+# Only this script is copied. The other files in scripts/ import .ts sources
+# that a standalone image does not have, and shipping them would promise
+# something that cannot work.
+COPY --from=build --chown=nextjs:nodejs /app/scripts/set-password.mjs ./scripts/
+COPY --from=build --chown=nextjs:nodejs /app/lib/passwordHash.mjs /app/lib/passwordRules.mjs ./lib/
+
 USER nextjs
 EXPOSE 3000
 

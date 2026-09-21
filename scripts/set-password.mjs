@@ -6,16 +6,23 @@
  * be signed in to reach, which needs an account. Something outside the web app
  * has to break that circle, and it is this.
  *
- *   npx tsx scripts/set-password.mjs komil 'yangi-parol'
+ *   node scripts/set-password.mjs komil 'yangi-parol'
  *       give the account whose login is already "komil" a new password
  *
- *   npx tsx scripts/set-password.mjs komil 'yangi-parol' Komil
+ *   node scripts/set-password.mjs komil 'yangi-parol' Komil
  *       find the person called Komil, give them the login "komil" and that
  *       password — this is the form to use on a database that predates logins,
  *       where everybody still has a telegram_id and no username
  *
- *   npx tsx scripts/set-password.mjs --list
+ *   node scripts/set-password.mjs --list
  *       who exists, and whether they can sign in
+ *
+ * Plain node, not tsx, and it imports no TypeScript. That is the whole point:
+ * this has to run inside the production image, which is a Next standalone
+ * build — server.js, the traced node_modules and nothing else. pg is in there
+ * because lib/db.ts uses it. An earlier version imported ../lib/password.ts and
+ * could therefore only run from a checkout, which is precisely what the first
+ * account has no way to get at.
  *
  * Add --temporary to make them choose a new password on first sign-in. The
  * first direktor is not forced to, because there is nobody to reset it for
@@ -24,9 +31,13 @@
  * Connects as the owner (DATABASE_URL_OWNER), which bypasses RLS — the same
  * connection the app uses to write a password.
  */
-import 'dotenv/config'
+// Only when there is one to read. In the container the environment comes from
+// compose, and dotenv is a devDependency that is not installed there.
+try { await import('dotenv/config') } catch { /* no .env: compose supplies it */ }
+
 import { Pool } from 'pg'
-import { hashPassword, normalizeUsername, passwordProblem, usernameProblem } from '../lib/password.ts'
+import { hashPassword } from '../lib/passwordHash.mjs'
+import { normalizeUsername, passwordProblem, usernameProblem } from '../lib/passwordRules.mjs'
 
 const argv = process.argv.slice(2)
 const temporary = argv.includes('--temporary')
@@ -34,7 +45,13 @@ const list = argv.includes('--list')
 const [login, password, ...nameParts] = argv.filter((a) => !a.startsWith('--'))
 const name = nameParts.join(' ')
 
-const pool = new Pool({ connectionString: process.env.DATABASE_URL_OWNER })
+const url = process.env.DATABASE_URL_OWNER
+if (!url) {
+  console.error('\n  DATABASE_URL_OWNER is not set. Run this inside the app container,\n'
+    + '  or point it at the database yourself.\n')
+  process.exit(1)
+}
+const pool = new Pool({ connectionString: url })
 const q = (text, values) => pool.query(text, values)
 
 function die(msg) {
@@ -64,8 +81,8 @@ if (list) {
 if (!login || !password) {
   console.error(`
   Usage:
-    npx tsx scripts/set-password.mjs <login> <parol> [ism] [--temporary]
-    npx tsx scripts/set-password.mjs --list
+    node scripts/set-password.mjs <login> <parol> [ism] [--temporary]
+    node scripts/set-password.mjs --list
 `)
   process.exit(1)
 }

@@ -100,14 +100,16 @@ into a file in the repository is a password everybody has, so the first one is
 set by hand, once, on the server:
 
     docker compose -f docker-compose.prod.yml -f docker-compose.caddy.yml --env-file .env \
-      exec -T app npx tsx scripts/set-password.mjs komil '<parol>'
+      exec -T app node scripts/set-password.mjs komil '<parol>'
 
 On a database that predates logins — where everybody still has a `telegram_id`
 and nobody has a username — name the person as well, and they get both:
 
-    ... npx tsx scripts/set-password.mjs komil '<parol>' Komil
+    ... node scripts/set-password.mjs komil '<parol>' Komil
 
-`--list` prints everybody and whether they can sign in. Add `--temporary` to
+`--list` prints everybody and whether they can sign in. Plain `node`, not
+`npx tsx`: the script and the two plain-ESM modules it needs are copied into
+the image (`Dockerfile`), and `pg` is already in the traced `node_modules`. Add `--temporary` to
 make them choose a new password on arrival; the first direktor deliberately is
 not forced to, because there is nobody to reset it for them if they get stuck.
 
