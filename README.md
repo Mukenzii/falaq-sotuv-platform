@@ -99,8 +99,8 @@ that row has **no password**, so nobody can sign in yet. A password written
 into a file in the repository is a password everybody has, so the first one is
 set by hand, once, on the server:
 
-    docker compose -f docker-compose.prod.yml --env-file .env.prod exec -T app \
-      npx tsx scripts/set-password.mjs komil '<parol>'
+    docker compose -f docker-compose.prod.yml -f docker-compose.caddy.yml --env-file .env \
+      exec -T app npx tsx scripts/set-password.mjs komil '<parol>'
 
 On a database that predates logins — where everybody still has a `telegram_id`
 and nobody has a username — name the person as well, and they get both:
@@ -145,8 +145,8 @@ creates any title it cannot find, so a stray space or a different apostrophe
 does not fail — it grows a second, nearly identical tab next to the real one.
 To correct one:
 
-    docker compose -f docker-compose.prod.yml --env-file .env.prod exec -T db \
-      psql -U falaq_owner -d falaq \
+    docker compose -f docker-compose.prod.yml -f docker-compose.caddy.yml --env-file .env \
+      exec -T db psql -U falaq_owner -d falaq \
       -c "update regions set tab_title = '01 Toshkent' where code = '01';"
 
 A tab that holds anything the export did not write itself is skipped, not
