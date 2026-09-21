@@ -17,7 +17,10 @@ import type { CoreKey, FormDoc, QuestionBlock } from '@/lib/form/types'
  * Since db/25 that sheet is written once per region as well: the same header
  * and the same rows, split by the region of the shop each visit was filed
  * against, so a region head opens their own tab instead of filtering 600 rows.
- * The master tab still holds every visit — splitting a sheet is only useful if
+ * Every region has a tab from the start, whether or not anyone has been there,
+ * and each is titled by regions.tab_title ("01 Toshkent") rather than by the
+ * region's name ("Toshkent shahri") — see db/30. The master tab still holds
+ * every visit — splitting a sheet is only useful if
  * nothing stops being visible somewhere.
  *
  * Decisions worth not re-litigating:
@@ -77,7 +80,7 @@ export async function buildVisitSheet(db: Tx): Promise<{ master: Cell[][]; regio
 
   const visits = (await db.execute(sql`
     select v.id, to_char(v.visited_at, 'YYYY-MM-DD HH24:MI') vaqt, u.full_name manager,
-           g.name hudud, g.sort hudud_sort,
+           s.region_code, g.name hudud, g.tab_title, g.sort hudud_sort,
            s.code dokon, v.width_m, v.height_m,
            to_char(v.open_from, 'HH24:MI') open_from, to_char(v.open_to, 'HH24:MI') open_to,
            v.placement, v.facing::text facing, v.shelf_heights, v.visit_result,
@@ -118,7 +121,22 @@ export async function buildVisitSheet(db: Tx): Promise<{ master: Cell[][]; regio
 
   const header: Cell[] = [VISITS_MARK, 'Menejer', 'Hudud', ...inForm.map((q) => q.title),
     ...archived.map((q) => q.title), 'GPS', 'Vizit havolasi']
-  const byRegion = new Map<string, { sort: number; rows: Cell[][] }>()
+
+  /**
+   * Every region gets a tab, in code order, whether or not anyone has been
+   * there yet. An empty one is not noise: it is where a region head looks, and
+   * a tab that only appears once the first visit lands reads as a system that
+   * has lost their region. Keyed by code rather than by name, because two
+   * regions share a tab name bar the number in front of it ("01 Toshkent" and
+   * "10 Toshkent").
+   */
+  const allRegions = (await db.execute(sql`
+    select code, tab_title, sort from regions order by sort`)).rows as
+    Array<{ code: string; tab_title: string; sort: number }>
+  const byRegion = new Map<string, { title: string; sort: number; rows: Cell[][] }>()
+  for (const r of allRegions) {
+    byRegion.set(r.code, { title: r.tab_title, sort: r.sort, rows: [] })
+  }
   const rows = visits.map((v) => {
     const mine = byVisit.get(v.id)
     const answer = (q: QuestionBlock): Cell =>
@@ -130,20 +148,16 @@ export async function buildVisitSheet(db: Tx): Promise<{ master: Cell[][]; regio
       v.lat !== null && v.lng !== null ? `${Number(v.lat)}, ${Number(v.lng)}` : '',
       base ? `${base}/vizit/${v.id}` : v.id,
     ]
-    // A region gets a tab once it has a visit — fourteen empty tabs on a fresh
-    // spreadsheet would be noise, and the tab appears the moment it is earned.
-    // A shop with no region (no location in the sheet yet) has no tab to go in,
-    // so its visit lives in the master tab alone rather than being dropped.
-    if (v.hudud) {
-      if (!byRegion.has(v.hudud)) byRegion.set(v.hudud, { sort: v.hudud_sort, rows: [] })
-      byRegion.get(v.hudud)!.rows.push(row)
-    }
+    // A shop with no region (db/26: no location in the sheet yet, or abroad)
+    // has no tab to go in, so its visit lives in the master tab alone rather
+    // than being dropped.
+    byRegion.get(v.region_code)?.rows.push(row)
     return row
   })
 
-  const regions = [...byRegion.entries()]
-    .sort((a, b) => a[1].sort - b[1].sort)
-    .map(([title, r]) => ({ title, rows: [header, ...r.rows] }))
+  const regions = [...byRegion.values()]
+    .sort((a, b) => a.sort - b.sort)
+    .map((r) => ({ title: r.title, rows: [header, ...r.rows] }))
 
   return { master: [header, ...rows], regions }
 }

@@ -131,10 +131,27 @@ Visits push themselves as soon as they are saved; `/admin/sheets` shows the
 last successful push and any error.
 
 The push writes **one tab per region** plus the master tab holding every visit.
-Region tabs are named after the region (`Farg'ona`, `Toshkent shahri`) and
-appear the first time that region has a visit. A tab that holds anything the
-export did not write itself is skipped, not overwritten — so a tab someone on
-the team keeps by hand is safe even if it is named after a region.
+Every region has a tab from the start, empty until someone visits there, so a
+region head always has somewhere to look.
+
+Tab titles come from `regions.tab_title` (`01 Toshkent`, `40 Farg'ona`) and are
+stored rather than derived: the code in front is what sorts the tabs and what
+tells `01 Toshkent` from `10 Toshkent`, which are otherwise the same word. The
+`Hudud` column inside the sheet still carries the region's real name
+(`Toshkent shahri`), so the two are free to differ.
+
+**The title has to match the tab letter for letter.** `writeVisitTabs()`
+creates any title it cannot find, so a stray space or a different apostrophe
+does not fail — it grows a second, nearly identical tab next to the real one.
+To correct one:
+
+    docker compose -f docker-compose.prod.yml --env-file .env.prod exec -T db \
+      psql -U falaq_owner -d falaq \
+      -c "update regions set tab_title = '01 Toshkent' where code = '01';"
+
+A tab that holds anything the export did not write itself is skipped, not
+overwritten — so a tab someone on the team keeps by hand is safe even if it is
+named after a region.
 
 ### 7. Updating
 

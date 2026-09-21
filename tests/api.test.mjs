@@ -2320,6 +2320,21 @@ describe('regions', () => {
       'the Boshqa bucket is back')
   })
 
+  // db/30. The tab title is stored, not derived: "Toshkent shahri" and
+  // "Toshkent viloyati" are both "Toshkent" on a tab and are told apart only
+  // by the 01 and 10 in front of them.
+  test('every region has a tab title, and no two share one', () => {
+    assert.equal(psql('select count(*) from regions where tab_title is null'), '0')
+    assert.equal(psql('select count(distinct tab_title) from regions'), '14',
+      'two regions would fight over one tab')
+  })
+
+  test('the tab title starts with the region code, so tabs sort in code order', () => {
+    const wrong = psql(`select coalesce(string_agg(code, ', ' order by sort), '')
+                          from regions where tab_title not like code || ' %'`)
+    assert.equal(wrong, '', `these do not lead with their code: ${wrong}`)
+  })
+
   test('a shop that cannot be placed has no region rather than a wrong one', () => {
     // db/26: abroad (KR, KZ, RUS, MISR) and shops with no location at all.
     // Inventing a region for them would put a shop nobody can visit on a
