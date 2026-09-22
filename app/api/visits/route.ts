@@ -40,13 +40,14 @@ export async function POST(req: Request) {
     return NextResponse.json({ error: "do'kon tanlanmagan" }, { status: 400 })
   }
 
-  // A manager may only file against a shop that is theirs (db/25). The RLS
-  // policy v_insert enforces this on its own, but a policy violation arrives as
-  // a bare 42501 after the whole body has been validated and the photos
-  // uploaded — so check it up front and say which shop and why.
+  // A manager may only file against a shop that is theirs outright or on their
+  // weekly plan (db/31). The RLS policy v_insert enforces this on its own, but
+  // a policy violation arrives as a bare 42501 after the whole body has been
+  // validated and the photos uploaded — so check it up front, with the same
+  // function the policy uses, and say which shop and why.
   const owned = await asUser(me, async (db) => {
     const r = await db.execute(sql`
-      select s.code, (s.owner_id = current_user_id()) as meniki, s.active
+      select s.code, store_is_mine(s.id) as meniki, s.active
         from stores s where s.id = ${b.store_id}`)
     return r.rows[0] as { code: string; meniki: boolean; active: boolean } | undefined
   })
