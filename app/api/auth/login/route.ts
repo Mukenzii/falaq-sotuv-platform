@@ -17,8 +17,16 @@ import { DUMMY_HASH, normalizeUsername, verifyPassword } from '@/lib/password'
  * a way of asking whether somebody works here.
  */
 const WRONG = 'Login yoki parol noto‘g‘ri'
-const MAX_FAILS = 8
-const LOCK_MINUTES = 15
+
+/**
+ * A wrong password costs a minute before the next try. That is slow enough
+ * that guessing a password at any useful rate is off the table, and short
+ * enough that somebody who simply mistyped waits once and carries on.
+ *
+ * It replaces the eight-strikes-then-fifteen-minutes rule, which let a guesser
+ * have seven free attempts back to back.
+ */
+const COOLDOWN_SECONDS = 60
 
 export async function POST(req: Request) {
   const body = await req.json().catch(() => ({}))
@@ -47,20 +55,20 @@ export async function POST(req: Request) {
   const ok = await verifyPassword(password, row?.password_hash ?? DUMMY_HASH)
 
   if (!row || !ok || !row.active || locked) {
-    if (row && !ok) {
-      // Count the miss, and stop counting once the door is already shut.
+    // Count the miss and start the wait. Not while already waiting: hammering
+    // the form must not keep pushing the deadline further away.
+    if (row && !ok && !locked) {
       await asSystem((db) => db.execute(sql`
         update users
            set failed_logins = failed_logins + 1,
-               locked_until = case when failed_logins + 1 >= ${MAX_FAILS}
-                                   then now() + (${LOCK_MINUTES} || ' minutes')::interval
-                                   else locked_until end
+               locked_until = now() + (${COOLDOWN_SECONDS} || ' seconds')::interval
          where id = ${row.id}`))
     }
     if (locked) {
+      const left = Math.max(1, Math.ceil((new Date(row!.locked_until!).getTime() - Date.now()) / 1000))
       return NextResponse.json(
-        { error: `Hisob vaqtincha bloklandi. ${LOCK_MINUTES} daqiqadan keyin urinib ko‘ring.` },
-        { status: 429 },
+        { error: `Juda ko‘p urinish. ${left} soniyadan keyin qaytadan urinib ko‘ring.`, retry_after: left },
+        { status: 429, headers: { 'retry-after': String(left) } },
       )
     }
     if (row && !row.active && ok) {
