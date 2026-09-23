@@ -226,6 +226,7 @@ describe('auth', () => {
   })
 
   test('an unknown login gets the same answer as a wrong password', async () => {
+    psql(`update users set failed_logins = 0 where id = '${U.sardor}'`)
     const a = await req('/api/auth/login', { method: 'POST', body: { login: LOGIN.user, password: 'x'.repeat(12) } })
     const b = await req('/api/auth/login', { method: 'POST', body: { login: 'yoq.odam', password: 'x'.repeat(12) } })
     assert.equal(a.status, 401)
@@ -254,18 +255,53 @@ describe('auth', () => {
     assert.equal(typeof r.json[0].has_password, 'boolean')
   })
 
-  test('repeated wrong passwords lock the account, and a reset unlocks it', async () => {
-    for (let i = 0; i < 8; i++) {
-      await req('/api/auth/login', { method: 'POST', body: { login: LOGIN.user, password: 'notit-notit' } })
-    }
-    const locked = await req('/api/auth/login', {
+  // The rule these two guard is the one the old lockout broke: a wrong password
+  // makes the NEXT WRONG one slower, and nothing else. Somebody holding the
+  // right password is never made to wait, whatever they typed a moment ago.
+  test('a miss does not stand between you and the right password', async () => {
+    psql(`update users set failed_logins = 0 where id = '${U.sardor}'`)
+    const miss = await req('/api/auth/login', {
+      method: 'POST', body: { login: LOGIN.user, password: 'notit-notit' },
+    })
+    assert.equal(miss.status, 401)
+
+    const t0 = Date.now()
+    const inNow = await req('/api/auth/login', {
       method: 'POST', body: { login: LOGIN.user, password: LOGIN.password },
     })
-    assert.equal(locked.status, 429, 'the right password should still be refused while locked')
+    const spent = Date.now() - t0
+    assert.equal(inNow.status, 200, inNow.text)
+    assert.ok(spent < 2000, `a correct password waited ${spent}ms — it must not wait at all`)
+    assert.equal(psql(`select failed_logins from users where id = '${U.sardor}'`), '0',
+      'signing in has to wipe the count, or the penalty outlives the mistake')
+  })
 
+  test('consecutive wrong passwords cost more each time', async () => {
+    psql(`update users set failed_logins = 0 where id = '${U.sardor}'`)
+    const wrong = { method: 'POST', body: { login: LOGIN.user, password: 'notit-notit' } }
+
+    const t0 = Date.now()
+    const first = await req('/api/auth/login', wrong)
+    const firstMs = Date.now() - t0
+    assert.equal(first.status, 401)
+    assert.ok(firstMs < 2000, `the first miss took ${firstMs}ms — one typo should cost nothing`)
+
+    const t1 = Date.now()
+    const second = await req('/api/auth/login', wrong)
+    const secondMs = Date.now() - t1
+    assert.equal(second.status, 401)
+    assert.ok(secondMs >= 900, `the second miss came back in ${secondMs}ms — guessing is not being slowed`)
+    assert.equal(second.json.error, first.json.error, 'the delay must not change what the form is told')
+
+    psql(`update users set failed_logins = 0 where id = '${U.sardor}'`)
+  })
+
+  test('a reset clears the count and forces a new password on arrival', async () => {
+    psql(`update users set failed_logins = 5 where id = '${U.sardor}'`)
     const reset = await req(`/api/users/${U.sardor}/password`, { as: U.komil, method: 'POST' })
     assert.equal(reset.status, 200, reset.text)
     LOGIN.password = reset.json.password
+    assert.equal(psql(`select failed_logins from users where id = '${U.sardor}'`), '0')
 
     const after = await req('/api/auth/login', {
       method: 'POST', body: { login: LOGIN.user, password: LOGIN.password },

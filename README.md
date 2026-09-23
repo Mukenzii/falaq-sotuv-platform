@@ -119,8 +119,13 @@ time they sign in. There is no sign-up, no email, and no "forgot my password" â€
 somebody locked out asks an admin, who presses **Parolni tiklash** and reads
 them the new one. It is shown once and never again.
 
-There is deliberately no back door. Eight wrong passwords lock an account for
-fifteen minutes; a reset clears the lock.
+There is deliberately no back door, and no lockout either. An account is never
+closed by failed attempts â€” the right password is always let straight through,
+because a manager standing in a shop who mistypes once must not be shut out.
+What a wrong password costs is time on the *next wrong one*: the delay climbs
+0, 1, 2, 4, 8, 16, 30 seconds across consecutive misses and resets the moment
+somebody signs in. Attempts running side by side are capped per IP by nginx
+(`web/default.conf.template`), which is the layer that can see them.
 
 ### 6. Google Sheets
 
