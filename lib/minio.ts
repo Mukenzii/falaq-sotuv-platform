@@ -137,6 +137,19 @@ export function isConfigured(): boolean {
 }
 
 /**
+ * Store bytes under a key from the server itself, over the internal endpoint.
+ * Only the production self-test needs this: everything else uploads straight
+ * from the phone through a presigned link.
+ */
+export async function putObject(objectKey: string, body: Buffer, contentType: string): Promise<void> {
+  await ensureBucket()
+  const r = await fetch(presignPath('PUT', objectPath(objectKey), 60, true), {
+    method: 'PUT', body: new Blob([new Uint8Array(body)]), headers: { 'content-type': contentType },
+  })
+  if (!r.ok) throw new Error(`rasm saqlanmadi: ${r.status} ${await r.text()}`)
+}
+
+/**
  * Remove objects for good, used when an admin deletes a visit. The database
  * rows go inside the transaction; the files go after it commits, because an
  * orphaned file costs disk and an orphaned row costs a broken page.

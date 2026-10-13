@@ -2547,3 +2547,45 @@ describe('signing in a second time, and on a second device', () => {
     }
   })
 })
+
+describe('production self-test', () => {
+  // /admin/tekshiruv files a real visit and must take every trace of it away.
+  // The suite pauses the Sheets push, so the spreadsheet steps are not judged here.
+  const run = (as, region = '40') => req('/api/selftest', { as, method: 'POST', body: { region } })
+  const debris = () => psql("select count(*) from stores where code like 'TEST-TEKSHIRUV-%'")
+  const states = (r) => Object.fromEntries(r.json.steps.map((s) => [s.name, s.state]))
+
+  test('only an admin may run it', async () => {
+    assert.equal((await run(undefined)).status, 401)
+    assert.equal((await run(U.sardor)).status, 403)
+  })
+
+  test('a region that does not exist is refused, not half-run', async () => {
+    assert.equal((await run(U.komil, 'xx')).status, 400)
+    assert.equal((await run(U.komil, '77')).status, 400)
+    assert.equal(debris(), '0')
+  })
+
+  test('it files a visit through the real route and leaves nothing behind', async () => {
+    const visits = psql('select count(*) from visits')
+    const log = psql('select count(*) from deleted_visits')
+    const r = await run(U.komil)
+    assert.equal(r.status, 200)
+    const s = states(r)
+    assert.equal(s['Vizit yuborildi'], 'ok', JSON.stringify(r.json.steps))
+    assert.equal(s['Bazaga yozildi'], 'ok', JSON.stringify(r.json.steps))
+    assert.equal(s["Test ma'lumotlari o'chirildi"], 'ok')
+    assert.equal(debris(), '0')
+    assert.equal(psql('select count(*) from visits'), visits)
+    assert.equal(psql('select count(*) from deleted_visits'), log, 'a test deletion is not an audited one')
+  })
+
+  test('a run that died halfway is swept up by the next one', async () => {
+    psql(`insert into stores (code, name, region, territory, owner_id, active)
+          values ('TEST-TEKSHIRUV-debris', 'x', 'x', '40 x', '${U.komil}', true)`)
+    const r = await run(U.komil)
+    assert.equal(r.json.steps[0].state, 'ok')
+    assert.match(r.json.steps[0].detail, /1 ta test do'kon/)
+    assert.equal(debris(), '0')
+  })
+})

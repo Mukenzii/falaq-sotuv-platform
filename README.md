@@ -139,6 +139,22 @@ runs on an empty volume, so apply them yourself, in order:
 
 Every migration is written to be safe to re-run.
 
+Then check production end to end at **`/admin/tekshiruv`** (admins only). Pick
+a region and press **Testni boshlash**. In one to two minutes it:
+
+1. opens a throwaway shop in that region (code `TEST-TEKSHIRUV-…`), owned by you;
+2. files a visit with test answers through the same `POST /api/visits` a phone
+   uses — every question of the published form, added ones included;
+3. checks the row in the database and waits for the automatic Sheets push;
+4. checks the visit is in the master tab and the region's tab, and nowhere else;
+5. deletes the visit, its photo and the shop, pushes again and checks the row
+   is gone from every tab.
+
+Cleanup runs even when a step fails, and every run first sweeps anything a
+previous run left behind. The deletion is not written to `deleted_visits`: a
+test leaves no trace. If the push is paused on `/admin/sheets`, the Sheets
+steps fail and say so.
+
 ### 8. Backups
 
     docker compose -f docker-compose.prod.yml --env-file .env.prod exec -T db \

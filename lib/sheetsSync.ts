@@ -71,7 +71,9 @@ export type RegionRows = { code: string; name: string; rows: Cell[][] }
  * The whole visits tab, header first, plus the same thing split by region.
  * Exported so it can be checked without Google.
  */
-export async function buildVisitSheet(db: Tx): Promise<{ master: Cell[][]; regions: RegionRows[] }> {
+export async function buildVisitSheet(db: Tx): Promise<{
+  master: Cell[][]; regions: RegionRows[]; header: Cell[]; allRegions: Array<{ code: string; name: string }>
+}> {
   const base = (process.env.APP_PUBLIC_URL ?? '').trim().replace(/\/+$/, '')
 
   const versions = (await db.execute(sql`
@@ -150,7 +152,10 @@ export async function buildVisitSheet(db: Tx): Promise<{ master: Cell[][]; regio
     .sort((a, b) => a[1].sort - b[1].sort)
     .map(([code, r]) => ({ code, name: r.name, rows: [header, ...r.rows] }))
 
-  return { master: [header, ...rows], regions }
+  const allRegions = (await db.execute(sql`select code, name from regions order by sort`)).rows as
+    Array<{ code: string; name: string }>
+
+  return { master: [header, ...rows], regions, header, allRegions }
 }
 
 /** Say the spreadsheet is behind. Cheap, and safe to call from a request. */
@@ -195,13 +200,23 @@ export async function runSheetsSync(): Promise<SyncResult> {
     const existing = await listTabs()
     const master = await masterTabTitle(existing)
     const titles = existing.map((t) => t.title)
+    // A region whose last visit was deleted still has a tab full of it, so an
+    // existing tab of a region with no visits is written down to its header. A
+    // region that never had a tab does not get an empty one.
+    const withVisits = new Set(sheet.regions.map((r) => r.code))
+    const emptied = sheet.allRegions
+      .filter((g) => !withVisits.has(g.code))
+      .map((g) => regionTabTitle(g.code, g.name, titles, master))
+      .filter((title) => titles.includes(title))
+      .map((title) => ({ title, rows: [sheet.header] }))
     const tabs = [
       { title: master, rows: sheet.master },
-      ...sheet.regions
-        .map((r) => ({ title: regionTabTitle(r.code, r.name, titles, master), rows: r.rows }))
-        .filter((r) => r.title !== master),
+      ...[
+        ...sheet.regions.map((r) => ({ title: regionTabTitle(r.code, r.name, titles, master), rows: r.rows })),
+        ...emptied,
+      ].filter((r) => r.title !== master),
     ]
-    const out = await writeVisitTabs(tabs, VISITS_MARK)
+    const out = await writeVisitTabs(tabs, VISITS_MARK, existing)
     const wrote = out.wrote
     if (out.skipped.length) {
       console.warn('[sheets] boshqa ma\'lumot bor, yozilmadi:', out.skipped.join(', '))
@@ -254,6 +269,17 @@ export function ensureSheetsSyncing() {
 export function pushSheetsSoon() {
   ensureSheetsSyncing()
   void markSheetsDirty().then(() => runSheetsSync()).catch(() => {})
+}
+
+/** Has a push finished since this moment? Compared in Postgres, on its clock. */
+export async function sheetsPushedSince(epochSeconds: number) {
+  return asSystem(async (db) => {
+    const r = await db.execute(sql`
+      select paused, dirty, last_error,
+             coalesce(last_ok_at >= to_timestamp(${epochSeconds}), false) as done
+        from sheets_sync where id`)
+    return r.rows[0] as { paused: boolean; dirty: boolean; last_error: string | null; done: boolean }
+  })
 }
 
 export async function sheetsStatus() {
