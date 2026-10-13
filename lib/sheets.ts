@@ -177,8 +177,8 @@ async function api(path: string, init?: RequestInit, spreadsheetId?: string) {
  * There is one tab per region plus the master tab holding every visit — the
  * region heads asked for their own page and nobody wanted to lose the single
  * list. The master tab is the one the configured link points at (by gid), or
- * "vizitlar" when the link names none; the region tabs are named after the
- * region ("Farg'ona", "Toshkent shahri").
+ * "vizitlar" when the link names none; a region's tab is found by the code its
+ * title starts with ("40 Farg'ona"), see regionTabTitle().
  *
  * Each write clears a whole tab, and the target is a spreadsheet the team works
  * in by hand. So a tab is only overwritten when it is empty or its first cell
@@ -191,9 +191,7 @@ export async function writeVisitTabs(
   mark: string,
 ): Promise<{ wrote: Record<string, number>; skipped: string[] }> {
   // one metadata read for the whole push, not one per tab
-  const meta = await api('?fields=sheets.properties(sheetId,title)')
-  const existing: Array<{ sheetId: number; title: string }> =
-    (meta.sheets ?? []).map((x: any) => x.properties)
+  const existing = await listTabs()
 
   const missing = tabs.filter((t) => !existing.some((e) => e.title === t.title))
   if (missing.length) {
@@ -224,18 +222,45 @@ export async function writeVisitTabs(
   return { wrote, skipped }
 }
 
+/** Every tab in the export spreadsheet, in the order the team sees them. */
+export async function listTabs(): Promise<Array<{ sheetId: number; title: string }>> {
+  const meta = await api('?fields=sheets.properties(sheetId,title)')
+  return (meta.sheets ?? []).map((x: any) => x.properties)
+}
+
 /**
  * The name of the tab every visit goes to. The gid in the configured link when
  * there is one — that is how the team points the export at a tab they made —
- * otherwise "vizitlar".
+ * otherwise "vizitlar". Pass the tab list when the caller already has it.
  */
-export async function masterTabTitle(): Promise<string> {
+export async function masterTabTitle(
+  tabs?: Array<{ sheetId: number; title: string }>,
+): Promise<string> {
   const target = spreadsheetTarget()
   if (!target?.gid) return 'vizitlar'
-  const meta = await api('?fields=sheets.properties(sheetId,title)')
-  const hit = meta.sheets?.find((s: any) => String(s.properties.sheetId) === target.gid)
+  const hit = (tabs ?? await listTabs()).find((t) => String(t.sheetId) === target.gid)
   if (!hit) throw new Error(`Havoladagi varaq (gid=${target.gid}) jadvalda topilmadi`)
-  return hit.properties.title as string
+  return hit.title
+}
+
+/**
+ * The tab a region's visits go to.
+ *
+ * A tab belongs to a region when the number its title starts with IS the
+ * region code: "40 Farg'ona", "40-Farg'ona" and "40 Fargona" are all region 40,
+ * while "0104 Chilonzor" (a district) and "4 Farg'ona" are not. The words after
+ * the code are the team's to rename. Matching on the whole name used to make
+ * every rename look like a missing tab, and the next push created a fresh
+ * "Farg'ona" beside the renamed one.
+ *
+ * The master tab never counts, even when its title starts with a code: it holds
+ * every visit, and one region's rows written over it would lose the rest. Two
+ * tabs with the same code: the first one in the spreadsheet wins. No tab at
+ * all: a new one is named "<code> <region>", the way the team names them.
+ */
+export function regionTabTitle(code: string, name: string, titles: string[], master: string): string {
+  const own = titles.find((t) => t !== master && /^\s*(\d+)/.exec(t)?.[1] === code)
+  return own ?? `${code} ${name}`
 }
 
 /**

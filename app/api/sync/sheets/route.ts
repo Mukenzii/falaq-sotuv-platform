@@ -46,7 +46,11 @@ export async function POST() {
   if (!allowed) return NextResponse.json({ error: "ruxsat yo'q" }, { status: 403 })
 
   const out = await runSheetsSync()
-  if (out.ok) return NextResponse.json({ ok: true, wrote: out.wrote, at: new Date().toISOString() })
+  if (out.ok) {
+    return NextResponse.json({
+      ok: true, wrote: out.wrote, skipped: out.skipped, at: new Date().toISOString(),
+    })
+  }
   if (out.reason === 'not-configured') {
     return NextResponse.json({ error: sheetsProblem() ?? 'Google Sheets sozlanmagan' }, { status: 503 })
   }
