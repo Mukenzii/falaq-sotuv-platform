@@ -1551,6 +1551,42 @@ describe('pointing the export at a different spreadsheet', () => {
     assert.equal(gidFrom(ID), null)
   })
 
+  // The tabs of the real "Sotuv uchun" sheet on 2026-10-13: the team renamed the
+  // exported region tabs to "<code> <name>", and the master tab — the one the
+  // link's gid points at — to "01 Toshkent " with a trailing space.
+  const TABS = ['01 Toshkent ', '10 Toshkent', '20 Sirdaryo', '25 Jizzax', '30 Samarqand',
+    "40 Farg'ona", '50 Namangan', '60 Andijon', '70 Qashqadaryo', '75 Surxandaryo', '80 Buxoro',
+    '90 Xorazm', "95 Qoraqalpog'iston", "Do'konlar", "Do'konlar yangi", 'MML', 'Kitoblar',
+    'vizitlar', 'vizit_kitoblar', 'bugungi_reja', 'Toshkent shahri', '01 Toshkent', '85 Navoiy']
+  const MASTER = '01 Toshkent '
+
+  test('a region writes to the tab whose title starts with its code', async () => {
+    const { regionTabTitle } = await import('../lib/sheets.ts')
+    assert.equal(regionTabTitle('40', "Farg'ona", TABS, MASTER), "40 Farg'ona")
+    assert.equal(regionTabTitle('10', 'Toshkent viloyati', TABS, MASTER), '10 Toshkent')
+    assert.equal(regionTabTitle('85', 'Navoiy', TABS, MASTER), '85 Navoiy', 'tab order does not matter')
+  })
+
+  test('the master tab is never taken for a region, even when it starts with the code', async () => {
+    const { regionTabTitle } = await import('../lib/sheets.ts')
+    // and the old full-name tab is not picked up either: the code decides
+    assert.equal(regionTabTitle('01', 'Toshkent shahri', TABS, MASTER), '01 Toshkent')
+    assert.equal(regionTabTitle('01', 'Toshkent shahri', [MASTER], MASTER), '01 Toshkent shahri')
+  })
+
+  test('only the whole leading number counts as the code', async () => {
+    const { regionTabTitle } = await import('../lib/sheets.ts')
+    const tabs = ['0104 Chilonzor', '4 Fargona', '400 test', ' 40-Farg\'ona']
+    assert.equal(regionTabTitle('01', 'Toshkent shahri', tabs, 'vizitlar'), '01 Toshkent shahri',
+      'a district tab is not its region')
+    assert.equal(regionTabTitle('40', "Farg'ona", tabs, 'vizitlar'), " 40-Farg'ona")
+  })
+
+  test('a region with no tab gets one named the way the team names them', async () => {
+    const { regionTabTitle } = await import('../lib/sheets.ts')
+    assert.equal(regionTabTitle('80', 'Buxoro', ["Do'konlar", 'MML'], 'vizitlar'), '80 Buxoro')
+  })
+
   test('the status endpoint names the sheet it will write to', async () => {
     const r = await req('/api/sync/sheets', { as: U.komil })
     assert.equal(r.status, 200)

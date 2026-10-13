@@ -1,6 +1,8 @@
 import { sql } from 'drizzle-orm'
 import { asSystem, type Tx } from '@/lib/db'
-import { writeVisitTabs, masterTabTitle, isConfigured, SheetsNotConfigured } from '@/lib/sheets'
+import {
+  writeVisitTabs, listTabs, masterTabTitle, regionTabTitle, isConfigured, SheetsNotConfigured,
+} from '@/lib/sheets'
 import { questionColumns } from '@/lib/form/export'
 import { answerText, type AnswerValue } from '@/lib/form/answers'
 import type { CoreKey, FormDoc, QuestionBlock } from '@/lib/form/types'
@@ -62,13 +64,14 @@ function coreCell(key: CoreKey, v: any, base: string): Cell {
   }
 }
 
-export type VisitTab = { title: string; rows: Cell[][] }
+/** One region's rows. Which tab they land in is decided at push time, by code. */
+export type RegionRows = { code: string; name: string; rows: Cell[][] }
 
 /**
  * The whole visits tab, header first, plus the same thing split by region.
  * Exported so it can be checked without Google.
  */
-export async function buildVisitSheet(db: Tx): Promise<{ master: Cell[][]; regions: VisitTab[] }> {
+export async function buildVisitSheet(db: Tx): Promise<{ master: Cell[][]; regions: RegionRows[] }> {
   const base = (process.env.APP_PUBLIC_URL ?? '').trim().replace(/\/+$/, '')
 
   const versions = (await db.execute(sql`
@@ -77,7 +80,7 @@ export async function buildVisitSheet(db: Tx): Promise<{ master: Cell[][]; regio
 
   const visits = (await db.execute(sql`
     select v.id, to_char(v.visited_at, 'YYYY-MM-DD HH24:MI') vaqt, u.full_name manager,
-           g.name hudud, g.sort hudud_sort,
+           g.code hudud_kod, g.name hudud, g.sort hudud_sort,
            s.code dokon, v.width_m, v.height_m,
            to_char(v.open_from, 'HH24:MI') open_from, to_char(v.open_to, 'HH24:MI') open_to,
            v.placement, v.facing::text facing, v.shelf_heights, v.visit_result,
@@ -118,7 +121,7 @@ export async function buildVisitSheet(db: Tx): Promise<{ master: Cell[][]; regio
 
   const header: Cell[] = [VISITS_MARK, 'Menejer', 'Hudud', ...inForm.map((q) => q.title),
     ...archived.map((q) => q.title), 'GPS', 'Vizit havolasi']
-  const byRegion = new Map<string, { sort: number; rows: Cell[][] }>()
+  const byRegion = new Map<string, { name: string; sort: number; rows: Cell[][] }>()
   const rows = visits.map((v) => {
     const mine = byVisit.get(v.id)
     const answer = (q: QuestionBlock): Cell =>
@@ -134,16 +137,18 @@ export async function buildVisitSheet(db: Tx): Promise<{ master: Cell[][]; regio
     // spreadsheet would be noise, and the tab appears the moment it is earned.
     // A shop with no region (no location in the sheet yet) has no tab to go in,
     // so its visit lives in the master tab alone rather than being dropped.
-    if (v.hudud) {
-      if (!byRegion.has(v.hudud)) byRegion.set(v.hudud, { sort: v.hudud_sort, rows: [] })
-      byRegion.get(v.hudud)!.rows.push(row)
+    if (v.hudud_kod) {
+      if (!byRegion.has(v.hudud_kod)) {
+        byRegion.set(v.hudud_kod, { name: v.hudud, sort: v.hudud_sort, rows: [] })
+      }
+      byRegion.get(v.hudud_kod)!.rows.push(row)
     }
     return row
   })
 
   const regions = [...byRegion.entries()]
     .sort((a, b) => a[1].sort - b[1].sort)
-    .map(([title, r]) => ({ title, rows: [header, ...r.rows] }))
+    .map(([code, r]) => ({ code, name: r.name, rows: [header, ...r.rows] }))
 
   return { master: [header, ...rows], regions }
 }
@@ -157,7 +162,7 @@ export async function markSheetsDirty() {
 }
 
 export type SyncResult =
-  | { ok: true; wrote: Record<string, number> }
+  | { ok: true; wrote: Record<string, number>; skipped: string[] }
   | { ok: false; reason: 'not-configured' | 'busy' | 'paused' | 'failed'; error?: string }
 
 /**
@@ -184,12 +189,17 @@ export async function runSheetsSync(): Promise<SyncResult> {
 
   try {
     const sheet = await asSystem(buildVisitSheet)
-    // the master tab keeps its configured name; the region tabs are named after
-    // the region, and a name collision between the two simply means one write
-    const master = await masterTabTitle()
+    // The master tab is found by gid; a region's tab by the code its title
+    // starts with, so the team can rename "Farg'ona" to "40 Farg'ona" and the
+    // visits keep going there. A collision with the master is one write.
+    const existing = await listTabs()
+    const master = await masterTabTitle(existing)
+    const titles = existing.map((t) => t.title)
     const tabs = [
       { title: master, rows: sheet.master },
-      ...sheet.regions.filter((r) => r.title !== master),
+      ...sheet.regions
+        .map((r) => ({ title: regionTabTitle(r.code, r.name, titles, master), rows: r.rows }))
+        .filter((r) => r.title !== master),
     ]
     const out = await writeVisitTabs(tabs, VISITS_MARK)
     const wrote = out.wrote
@@ -202,7 +212,7 @@ export async function runSheetsSync(): Promise<SyncResult> {
          set dirty = false, dirty_since = null, last_ok_at = now(),
              last_error = null, last_error_at = null
        where id`))
-    return { ok: true, wrote }
+    return { ok: true, wrote, skipped: out.skipped }
   } catch (e) {
     const msg = e instanceof SheetsNotConfigured ? e.message : (e as Error).message
     await asSystem((db) => db.execute(sql`

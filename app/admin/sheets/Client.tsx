@@ -95,9 +95,13 @@ export default function SheetsClient() {
     // `wrote` is one entry per tab now: the master tab and one per region
     const tabs = Object.entries((j.wrote ?? {}) as Record<string, number>)
     const rows = tabs.length ? Math.max(...tabs.map(([, n]) => n)) : 0
+    // a tab holding someone's own data is left alone; say which, or the region
+    // head finds an empty tab and nobody knows why
+    const skipped: string[] = j.skipped ?? []
     setMsg(r.ok
       ? { t: 'ok', m: `Yuborildi — ${rows} ta vizit, ${tabs.length} ta varaq (${
-          tabs.map(([t]) => t).join(', ')})` }
+          tabs.map(([t]) => t).join(', ')})${skipped.length
+            ? `. Boshqa ma'lumot bor, yozilmadi: ${skipped.join(', ')}` : ''}` }
       : { t: 'err', m: j.error })
   }
 
@@ -154,13 +158,15 @@ export default function SheetsClient() {
           <li>har bir vizit — bitta qator, eng yangisi pastda</li>
           <li>formadagi har bir savol — alohida ustun, savolning o&apos;z nomi bilan</li>
           <li>kitoblar, rasm havolalari, GPS va vizit havolasi ham</li>
-          <li>viloyat varaqlari: Toshkent shahri, Farg&apos;ona, Samarqand… — do&apos;kon
-            kodining birinchi ikki raqamidan aniqlanadi</li>
+          <li>viloyat varaqlari: 01 Toshkent, 40 Farg&apos;ona, 30 Samarqand… — vizit
+            do&apos;kon kodining birinchi ikki raqamidagi viloyatga tushadi</li>
+          <li>varaq nomi boshidagi kod bo&apos;yicha topiladi: koddan keyingi so&apos;zni
+            o&apos;zgartirish mumkin, kodni emas</li>
         </ul>
         <p className="hint">
-          Barcha xodimlarning vizitlari yuboriladi. Viloyat varag&apos;i birinchi vizit
-          kelganda o&apos;zi yaratiladi. Varaqda boshqa ma&apos;lumot bo&apos;lsa, ustiga
-          yozilmaydi — o&apos;sha varaq o&apos;tkazib yuboriladi.
+          Barcha xodimlarning vizitlari yuboriladi. Viloyat varag&apos;i bo&apos;lmasa,
+          birinchi vizit kelganda o&apos;zi yaratiladi. Varaqda boshqa ma&apos;lumot
+          bo&apos;lsa, ustiga yozilmaydi — o&apos;sha varaq o&apos;tkazib yuboriladi.
         </p>
         <button className="btn" disabled={busy || !info?.configured} onClick={sync}>
           {busy ? 'Yuborilmoqda…' : 'Jadvalga yuborish'}

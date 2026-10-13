@@ -117,10 +117,14 @@ Visits push themselves as soon as they are saved; `/admin/sheets` shows the
 last successful push and any error.
 
 The push writes **one tab per region** plus the master tab holding every visit.
-Region tabs are named after the region (`Farg'ona`, `Toshkent shahri`) and
-appear the first time that region has a visit. A tab that holds anything the
-export did not write itself is skipped, not overwritten — so a tab someone on
-the team keeps by hand is safe even if it is named after a region.
+A region's tab is found by the **code its title starts with**: `40 Farg'ona`,
+`40-Farg'ona` and `40 Fargona` are all region 40, so the words after the code
+can be renamed freely — the code cannot. The master tab (the link's gid) never
+counts as a region tab, even when it is named `01 …`. A region with no tab gets
+one named `<code> <region>` (`80 Buxoro`) the first time it has a visit. A tab
+that holds anything the export did not write itself is skipped, not
+overwritten, and the **Jadvalga yuborish** button names it — so a tab someone
+on the team keeps by hand is safe even if its title starts with a code.
 
 ### 7. Updating
 
