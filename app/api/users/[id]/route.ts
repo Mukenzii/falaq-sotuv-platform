@@ -31,6 +31,9 @@ export async function PATCH(req: Request, { params }: Ctx) {
   } catch (e: unknown) {
     // guard_last_direktor raises a plain exception
     if (pgCode(e) === 'P0001') return NextResponse.json({ error: pgMessage(e) }, { status: 409 })
+    // guard_own_row (db/32): someone without user rights touched more of their
+    // own row than their name and phone
+    if (pgCode(e) === '42501') return NextResponse.json({ error: pgMessage(e) }, { status: 403 })
     if (pgCode(e) === '23505') return NextResponse.json({ error: 'Bu Telegram hisobi allaqachon mavjud' }, { status: 409 })
     if (pgCode(e) === '23503') return NextResponse.json({ error: 'Bunday hudud yo‘q' }, { status: 400 })
     throw e

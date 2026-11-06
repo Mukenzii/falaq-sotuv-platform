@@ -329,6 +329,56 @@ describe('user management', () => {
     assert.equal(r.status, 404)
   })
 
+  // u_update lets you edit your own row, and until db/32 that meant all of it:
+  // a manager PATCHing their own role to direktor got a 200 and kept it.
+  test('a manager cannot change their own role, boss, status, region or Telegram', async () => {
+    const cols = 'role, parent_id, active, region_code, telegram_id, full_name'
+    const before = psql(`select ${cols} from users where id = '${U.malika}'`)
+    const region = psql('select code from regions order by code limit 1')
+    for (const body of [
+      { role: 'direktor' },
+      { parent_id: U.komil },
+      { active: false },
+      { region_code: region },
+      { telegram_id: 900000199 },
+      { full_name: 'Yashirincha', role: 'direktor' },
+    ]) {
+      const r = await req(`/api/users/${U.malika}`, { as: U.malika, method: 'PATCH', body })
+      assert.equal(r.status, 403, `${JSON.stringify(body)} was accepted`)
+      assert.match(r.json.error, /ism va telefon/)
+    }
+    assert.equal(psql(`select ${cols} from users where id = '${U.malika}'`), before,
+      'a refused update still changed the row')
+  })
+
+  test('a manager can still change their own name and phone', async () => {
+    const r = await req(`/api/users/${U.malika}`, {
+      as: U.malika, method: 'PATCH', body: { full_name: 'Sinov Manager A2 (yangi)', phone: '+998900000905' },
+    })
+    assert.equal(r.status, 200)
+    assert.equal(r.json.full_name, 'Sinov Manager A2 (yangi)')
+    assert.equal(psql(`select phone from users where id = '${U.malika}'`), '+998900000905')
+    psql(`update users set full_name = 'Sinov Manager A2', phone = null where id = '${U.malika}'`)
+  })
+
+  test('the own-row guard is the database\'s, not only the route\'s', () => {
+    assert.throws(() => psql(`begin;
+      select set_config('app.user_id', '${U.sardor}', true);
+      set local role falaq_app;
+      update users set role = 'direktor' where id = '${U.sardor}';
+      rollback;`), /ism va telefon/)
+    assert.equal(psql(`select role from users where id = '${U.sardor}'`), 'sotuv_manager')
+  })
+
+  test('the direktor can still change anyone\'s role', async () => {
+    const up = await req(`/api/users/${U.malika}`, { as: U.komil, method: 'PATCH', body: { role: 'hudud_rahbari' } })
+    assert.equal(up.status, 200)
+    assert.equal(up.json.role, 'hudud_rahbari')
+    const back = await req(`/api/users/${U.malika}`, { as: U.komil, method: 'PATCH', body: { role: 'sotuv_manager' } })
+    assert.equal(back.status, 200)
+    assert.equal(back.json.role, 'sotuv_manager')
+  })
+
   test('the direktor cannot delete themselves', async () => {
     assert.equal((await req(`/api/users/${U.komil}`, { as: U.komil, method: 'DELETE' })).status, 404)
   })
