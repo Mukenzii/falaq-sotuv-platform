@@ -10,8 +10,10 @@ import { mondayOf, parseDate } from '@/lib/plan'
  *
  * A task is (shop, day) — one person per shop per day, and a shop may be
  * planned on several days of a week. A week is named by its Monday. RLS does
- * the scoping — an admin sees and edits everyone, a manager sees their own
- * week and their team's, and nobody else's.
+ * the scoping — an admin sees and edits everyone; a hudud rahbari sees their
+ * branch and edits the plan of their regions' managers, for shops in those
+ * regions (can_plan, db/33); a manager sees their own week and their team's,
+ * and nobody else's.
  */
 
 const ids = (v: unknown): number[] | null => {
@@ -52,14 +54,21 @@ export async function GET(req: Request) {
         from v_week_summary where week_start = ${week}
        order by foiz nulls last, full_name`)
 
-    // everyone who could be given a shop, and every shop that could be given
+    // Everyone who could be given a shop by this person: everybody for an
+    // admin, the managers of their regions for a head (db/33). Every active
+    // shop, each saying whether this person may plan it — the board needs
+    // them all to describe a card, but offers only the plannable ones.
     const people = await db.execute(sql`
-      select id, full_name, role from users where active order by role, full_name`)
+      select id, full_name, role from users
+       where active and (can_manage_users() or id in (select my_region_workers()))
+       order by role, full_name`)
     const stores = await db.execute(sql`
-      select id, code, name, category, territory, store_type from stores where active order by code`)
+      select id, code, name, category, territory, store_type,
+             (can_manage_users() or region_code in (select my_regions())) as plannable
+        from stores where active order by code`)
 
     const meta = await db.execute(sql`
-      select can_manage_users() ok, current_date::text today`)
+      select can_plan_any() ok, current_date::text today`)
     const m = meta.rows[0] as { ok: boolean; today: string }
 
     return {
@@ -146,7 +155,8 @@ export async function PATCH(req: Request) {
 
   try {
     const res = await asUser(me, async (db) => {
-      const admin = await db.execute(sql`select can_manage_users() ok`)
+      // whether this task is one this person may touch is RLS's call (can_plan)
+      const admin = await db.execute(sql`select can_plan_any() ok`)
       if (!(admin.rows[0] as { ok: boolean }).ok) return 'forbidden' as const
       // A task a person moves or hands over stops belonging to its rule, and
       // the rule is told never to refill the day it came off. Both have to

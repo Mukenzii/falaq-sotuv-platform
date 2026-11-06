@@ -29,7 +29,11 @@ type Summary = {
   kechikdi: string; qoldi: string; borilmadi: string; foiz: string | null
 }
 type Person = { id: string; full_name: string; role: string }
-type Store = { id: Id; code: string; name: string; category: string | null; territory: string | null; store_type: string | null }
+type Store = {
+  id: Id; code: string; name: string; category: string | null; territory: string | null; store_type: string | null
+  // may this person put it on someone's plan (db/33)
+  plannable: boolean
+}
 type Data = {
   week: string; today: string; rows: Row[]; summary: Summary[]
   people: Person[]; stores: Store[]; canEdit: boolean
@@ -74,6 +78,13 @@ const shift = (day: string, days: number) => {
 }
 const ddmm = (day: string) => `${day.slice(8, 10)}.${day.slice(5, 7)}`
 const pretty = (week: string) => `${ddmm(week)} — ${ddmm(shift(week, 6))}`
+const OYLAR = ['Yanvar', 'Fevral', 'Mart', 'Aprel', 'May', 'Iyun', 'Iyul', 'Avgust', 'Sentabr', 'Oktabr', 'Noyabr', 'Dekabr']
+/** "2026-11" -> "Noyabr 2026" */
+const monthName = (ym: string) => `${OYLAR[Number(ym.slice(5, 7)) - 1]} ${ym.slice(0, 4)}`
+const shiftMonth = (ym: string, n: number) => {
+  const d = new Date(Date.UTC(Number(ym.slice(0, 4)), Number(ym.slice(5, 7)) - 1 + n, 1))
+  return d.toISOString().slice(0, 7)
+}
 const dayIndex = (week: string, day: string) =>
   Math.round((+new Date(day + 'T00:00:00Z') - +new Date(week + 'T00:00:00Z')) / 864e5)
 // a task is a shop on a day
@@ -131,6 +142,17 @@ export default function RejaClient() {
     setRules(r.ok ? (await r.json()).rows : [])
   }, [])
   useEffect(() => { loadRules() }, [loadRules])
+
+  // The Xodimlar table shows the week on the board, or a whole calendar month
+  // (db/34). The month is re-read whenever the board is, so an edit shows in it.
+  const [period, setPeriod] = useState<'hafta' | 'oy'>('hafta')
+  const [month, setMonth] = useState(() => monday(new Date()).slice(0, 7))
+  const [monthly, setMonthly] = useState<{ month: string; rows: Summary[] } | null>(null)
+  const loadMonth = useCallback(async (m: string) => {
+    const r = await fetch(`/api/plan/oylik?oy=${m}`)
+    setMonthly(r.ok ? await r.json() : null)
+  }, [])
+  useEffect(() => { if (period === 'oy') loadMonth(month) }, [period, month, data, loadMonth])
   // chosen days belong to the week they were chosen in
   useEffect(() => { setDays([]) }, [week])
 
@@ -158,7 +180,8 @@ export default function RejaClient() {
 
   const shown = useMemo(() => {
     const needle = q.trim().toLowerCase()
-    return (data?.stores ?? []).filter((s) =>
+    // only the shops this person may plan: all of them for an admin, a head's regions for a head
+    return (data?.stores ?? []).filter((s) => s.plannable &&
       (!onlyFree || !assigned.has(String(s.id))) &&
       storeMatches(s, hudud, turi) &&
       (!needle || `${s.code} ${s.name}`.toLowerCase().includes(needle)))
@@ -270,12 +293,37 @@ export default function RejaClient() {
         </div>
       </div>
 
-      <h2>Xodimlar</h2>
-      {data.summary.length === 0 ? (
-        <div className="card"><p className="hint" style={{ margin: 0 }}>
-          Bu haftaga hali reja tuzilmagan.{data.canEdit && ' Pastdan do’kon biriktiring.'}
-        </p></div>
-      ) : (
+      <div style={{ display: 'flex', alignItems: 'center', gap: '8px 16px', flexWrap: 'wrap' }}>
+        <h2 style={{ marginRight: 'auto' }}>Xodimlar</h2>
+        <div className="chips" role="group" aria-label="Davr">
+          <button type="button" className={`chip ${period === 'hafta' ? 'on' : ''}`} aria-pressed={period === 'hafta'}
+                  onClick={() => setPeriod('hafta')}>Haftalik</button>
+          {/* the month the board's week mostly falls in: its Thursday's */}
+          <button type="button" className={`chip ${period === 'oy' ? 'on' : ''}`} aria-pressed={period === 'oy'}
+                  onClick={() => { if (period !== 'oy') setMonth(shift(week, 3).slice(0, 7)); setPeriod('oy') }}>Oylik</button>
+        </div>
+      </div>
+      {period === 'oy' && (
+        // not .row: its children stretch, and the hint must wrap under the arrows on a phone
+        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, alignItems: 'center', margin: '0 0 12px' }}>
+          <button className="btn btn-ghost btn-sm" onClick={() => setMonth(shiftMonth(month, -1))}
+                  aria-label="Oldingi oy">‹</button>
+          <b style={{ minWidth: 110, textAlign: 'center' }}>{monthName(month)}</b>
+          <button className="btn btn-ghost btn-sm" onClick={() => setMonth(shiftMonth(month, 1))}
+                  aria-label="Keyingi oy">›</button>
+          <span className="hint">Reja kuni shu oyga tushgan vazifalar</span>
+        </div>
+      )}
+      {(() => {
+        const list = period === 'hafta' ? data.summary : monthly?.month.slice(0, 7) === month ? monthly.rows : null
+        if (list === null) return <div className="card"><p className="hint" style={{ margin: 0 }}>Yuklanmoqda…</p></div>
+        if (list.length === 0) return (
+          <div className="card"><p className="hint" style={{ margin: 0 }}>
+            {period === 'hafta' ? 'Bu haftaga hali reja tuzilmagan.' : 'Bu oyga reja yo‘q.'}
+            {period === 'hafta' && data.canEdit && ' Pastdan do’kon biriktiring.'}
+          </p></div>
+        )
+        return (
         <div className="card" style={{ overflowX: 'auto' }}>
           <table>
             <thead><tr>
@@ -283,7 +331,7 @@ export default function RejaClient() {
               <th>Qoldi</th><th>Borilmadi</th><th>%</th>
             </tr></thead>
             <tbody>
-              {data.summary.map((s) => (
+              {list.map((s) => (
                 <tr key={s.user_id}>
                   <td data-label="Xodim">{s.full_name}</td>
                   <td data-label="Reja">{s.reja}</td>
@@ -297,7 +345,8 @@ export default function RejaClient() {
             </tbody>
           </table>
         </div>
-      )}
+        )
+      })()}
 
       <h2>Doska</h2>
       <div className="klegend" aria-label="Holatlar">
@@ -345,7 +394,7 @@ export default function RejaClient() {
                 <DayColumn key={d} date={d} index={i} today={data.today} count={rows.length}
                            droppable={data.canEdit}>
                   {rows.map((r) => (
-                    <PlanCard key={rowKey(r)} row={r} showWho={!filter}
+                    <PlanCard key={rowKey(r)} row={r} showWho={!filter && data.summary.length > 1}
                               draggable={data.canEdit && !r.bajarildi}
                               onOpen={() => { if (!justDragged.current) setOpenKey(rowKey(r)) }} />
                   ))}
@@ -355,7 +404,7 @@ export default function RejaClient() {
           </div>
           {/* position: fixed — safe here because no ancestor has a transform */}
           <DragOverlay dropAnimation={null}>
-            {dragging && <div className={`kcard lifted h-${dragging.holat}`}><CardBody row={dragging} showWho={!filter} /></div>}
+            {dragging && <div className={`kcard lifted h-${dragging.holat}`}><CardBody row={dragging} showWho={!filter && data.summary.length > 1} /></div>}
           </DragOverlay>
         </DndContext>
       </div>
@@ -419,7 +468,7 @@ export default function RejaClient() {
               </div>
             </div>
 
-            <StoreFilters stores={data.stores} hudud={hudud} turi={turi} idPrefix="reja"
+            <StoreFilters stores={data.stores.filter((s) => s.plannable)} hudud={hudud} turi={turi} idPrefix="reja"
                           onChange={(k, v) => (k === 'hudud' ? setHudud(v) : setTuri(v))}
                           onClear={() => { setHudud(''); setTuri('') }} />
 

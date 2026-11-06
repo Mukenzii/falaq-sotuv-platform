@@ -7,7 +7,7 @@
  */
 import { test, before, after, describe } from 'node:test'
 import assert from 'node:assert/strict'
-import { createHmac } from 'node:crypto'
+import { createHmac, randomUUID } from 'node:crypto'
 import { execFileSync } from 'node:child_process'
 import 'dotenv/config'
 
@@ -901,26 +901,37 @@ describe('access from another device on the wifi', () => {
   const lanHost = `192.168.0.100:${PORT}`
 
   // fetch() drops a Host header, so these go through raw http
-  const raw = (path, host, method = 'GET') => new Promise((resolve, reject) => {
+  const raw = (path, host, method = 'GET', body) => new Promise((resolve, reject) => {
     import('node:http').then(({ default: http }) => {
       const rq = http.request(
-        { host: '127.0.0.1', port: PORT, path, method, headers: { host } },
-        (res) => { res.resume(); resolve({ status: res.statusCode, location: res.headers.location }) },
+        { host: '127.0.0.1', port: PORT, path, method,
+          headers: { host, cookie: cookie(U.komil), 'content-type': 'application/json' } },
+        (res) => {
+          let text = ''
+          res.setEncoding('utf8')
+          res.on('data', (chunk) => { text += chunk })
+          res.on('end', () => resolve({ status: res.statusCode, text }))
+        },
       )
       rq.on('error', reject)
-      rq.end()
+      rq.end(body ? JSON.stringify(body) : undefined)
     })
   })
 
   test('an upload link is signed for the host that asked for it', async () => {
-    const r = await fetch(`http://127.0.0.1:${PORT}/api/uploads/presign`, {
-      method: 'POST',
-      headers: { cookie: cookie(U.komil), 'content-type': 'application/json', host: lanHost },
-      body: JSON.stringify({ contentType: 'image/jpeg', bytes: 100 }),
-    })
-    const j = await r.json()
-    // node fetch drops the host header, so this asserts the localhost case holds
-    assert.match(j.url, /^http:\/\/[^/]+:9000\/falaq-photos\//)
+    const r = await raw('/api/uploads/presign', lanHost, 'POST', { contentType: 'image/jpeg', bytes: 100 })
+    assert.equal(r.status, 200, r.text)
+    const j = JSON.parse(r.text)
+    const signed = new URL(j.url)
+    // A configured public origin wins; otherwise the caller's hostname is used
+    // with the configured storage port, which need not be 9000 in local tests.
+    const expectedOrigin = process.env.MINIO_PUBLIC_ENDPOINT
+      ? new URL(process.env.MINIO_PUBLIC_ENDPOINT).origin
+      : `http://192.168.0.100:${new URL(process.env.MINIO_ENDPOINT).port || '9000'}`
+    assert.equal(signed.origin, expectedOrigin)
+    assert.equal(signed.pathname, `/${process.env.MINIO_BUCKET}/${j.objectKey}`)
+    assert.equal(signed.searchParams.get('X-Amz-SignedHeaders'), 'host')
+    assert.match(signed.searchParams.get('X-Amz-Signature'), /^[a-f0-9]{64}$/)
   })
 })
 
@@ -1670,6 +1681,7 @@ describe('a visit reaches Google Sheets by itself', () => {
   test('while paused nothing is pushed and the debt is kept', async () => {
     const r = await req('/api/sync/sheets', { as: U.komil, method: 'POST' })
     assert.equal(r.status, 409)
+    assert.match(r.json.error, /to‘xtatilgan/)
     assert.equal(state().dirty, true, 'a paused push must not clear the debt')
   })
 
@@ -1688,9 +1700,14 @@ describe('a visit reaches Google Sheets by itself', () => {
   test('two pushes cannot interleave', async () => {
     // hold the lease the way a running push does
     psql("update sheets_sync set paused = false, running_until = now() + interval '1 minute' where id")
-    const r = await req('/api/sync/sheets', { as: U.komil, method: 'POST' })
-    assert.equal(r.status, 409)
-    psql("update sheets_sync set running_until = null, paused = true where id")
+    try {
+      const r = await req('/api/sync/sheets', { as: U.komil, method: 'POST' })
+      assert.equal(r.status, 409)
+      assert.match(r.json.error, /Hozir yuborilmoqda/)
+      assert.equal(state().dirty, true, 'a busy push must not clear the debt')
+    } finally {
+      psql("update sheets_sync set running_until = null, paused = true where id")
+    }
   })
 })
 
@@ -1794,7 +1811,7 @@ describe('pulling the must-list out of the spreadsheet', () => {
     assert.ok(r.json.weights > 0)
     assert.ok(r.json.books.matched > 0)
     for (const k of ['aliased', 'created', 'notInSheet']) assert.ok(Array.isArray(r.json.books[k]), k)
-    assert.ok(r.json.targets.every((t) => t.total >= t.named))
+    assert.ok(r.json.targets.every((t) => t.required >= 0 && t.optional >= 0))
   })
 
   test('the per-store exception buttons are gone', async () => {
@@ -1805,111 +1822,194 @@ describe('pulling the must-list out of the spreadsheet', () => {
   })
 })
 
-describe('MML from weights: named titles and category shares', () => {
-  // A private column and private books, so the arithmetic can be checked by
-  // hand without depending on what the real sheet says today.
-  const COL = 'TEST MML ustun'
-  let store, saved, named, share, tiny
+describe('MML matrix: 1 required, 2 optional', () => {
+  // db/35. Private columns and books, so the arithmetic can be checked by hand
+  // without depending on what the real sheet says today. Codes are written the
+  // way the importer writes them; lib/mmlParse.ts is tested on its own.
+  const COL = 'TEST MML ustun'         // requires R1..R4, R1..R2 optional O1..O2, Z1 coded 0
+  const COL0 = 'TEST MML bo‘sh ustun'  // only optional and 0: nothing required
+  const COLL = 'TEST MML eski ustun'   // still holds an unconverted db/21 share
+  let store, store2, storeZero, storeNone, storeOld, storeApp, saved, R, O, Z, L
 
   const lit = (v) => (v === null ? 'null' : `'${String(v).replace(/'/g, "''")}'`)
   const book = (title, category) => psql(`with x as (
       insert into books (title, category) values (${lit(title)}, ${lit(category)})
       on conflict (title) do update set category = excluded.category, active = true
       returning id) select id from x`)
-  const row = () => JSON.parse(psql(`select row_to_json(x) from
-      (select store_category, kerak, bor, yetishmaydi, mml from v_mml where store_id = ${store}) x`))
+  const row = (id = store) => JSON.parse(psql(`select row_to_json(x) from
+      (select store_category, kerak, bor, yetishmaydi, mml, holat from v_mml where store_id = ${id}) x`))
+  const kinds = (id) => JSON.parse(psql(`select coalesce(json_object_agg(title, kind), '{}') from v_mml_book where store_id = ${id}
+      and title like 'TEST MML %'`))
+  const fixtures = () => [store, store2, storeZero, storeNone, storeOld, storeApp].join(',')
+  const allBooks = () => [...R, ...O, Z, L].join(',')
   const clean = () => {
-    psql(`delete from visit_books where visit_id in (select id from visits where store_id = ${store});
-          delete from visits where store_id = ${store};
-          delete from store_stock where store_id = ${store};
-          delete from mml_weights where mml_column like 'TEST MML%';
-          delete from books where title like 'TEST MML %';`)
+    psql(`delete from visit_books where visit_id in (select id from visits where store_id in (${fixtures()}));
+          delete from visits where store_id in (${fixtures()});
+          delete from store_stock where store_id in (${fixtures()});
+          delete from mml_weights where mml_column like 'TEST MML%' or book_id in (${allBooks()});`)
   }
+  const code = (column, id, c, weight = null) =>
+    `(${lit(column)}, ${id}, ${c === null ? 'null' : c}, ${weight === null ? 'null' : weight})`
+  const visit = (id, books) => req('/api/visits', {
+    as: U.sardor, method: 'POST', body: { store_id: Number(id), present_book_ids: books.map(Number) },
+  })
 
   before(() => {
-    store = psql("select id from stores where active order by id offset 30 limit 1")
-    saved = JSON.parse(psql(`select row_to_json(x) from
-      (select store_type, grade, owner_id from stores where id = ${store}) x`))
-    // since db/25 a visit may only be filed against a shop that is the
-    // manager's, and these tests file visits as sardor
-    psql(`update stores set owner_id = '${U.sardor}' where id = ${store}`)
+    const six = psql("select string_agg(id::text, ',' order by id) from (select id from stores where active order by id offset 30 limit 6) x").split(',')
+    ;[store, store2, storeZero, storeNone, storeOld, storeApp] = six
+    saved = JSON.parse(psql(`select json_agg(row_to_json(x)) from
+      (select id, store_type, grade, owner_id from stores where id in (${fixtures()})) x`))
+    psql(`update stores set owner_id = '${U.sardor}' where id in (${fixtures()})`)
+    R = [1, 2, 3, 4].map((i) => book(`TEST MML majburiy ${i}`, 'A'))
+    O = [1, 2].map((i) => book(`TEST MML ixtiyoriy ${i}`, 'B'))
+    Z = book('TEST MML nol', 'C')
+    L = book('TEST MML eski ulush', 'C')
     clean()
-    named = book('TEST MML nomma', 'TESTN')
-    // three titles at 0,5 -> 1,5 -> target 2
-    share = [1, 2, 3].map((i) => book(`TEST MML ulush ${i}`, 'TESTU'))
-    // five titles at 0,2 -> 1,0 exactly -> target 1 (floating point would say 2)
-    tiny = [1, 2, 3, 4, 5].map((i) => book(`TEST MML kichik ${i}`, 'TESTK'))
-    psql(`insert into mml_weights (mml_column, book_id, weight) values
-      ('${COL}', ${named}, 1),
-      ${share.map((id) => `('${COL}', ${id}, 0.5)`).join(', ')},
-      ${tiny.map((id) => `('${COL}', ${id}, 0.2)`).join(', ')}`)
-    psql(`update stores set store_type = '${COL}', grade = null where id = ${store}`)
+    psql(`insert into mml_weights (mml_column, book_id, code, weight) values
+      ${[...R.map((id) => code(COL, id, 1)), ...O.map((id) => code(COL, id, 2)), code(COL, Z, 0),
+         code(COL0, O[0], 2), code(COL0, Z, 0),
+         code(COLL, R[0], 1), code(COLL, L, null, 0.5),
+         // the A++ case: a real bookstore column, but only fixture titles in it
+         code("Kitob do'kon (A)", R[0], 1), code("Kitob do'kon (A)", O[0], 2)].join(', ')}`)
+    psql(`update stores set store_type = ${lit(COL)},  grade = null  where id in (${store}, ${store2});
+          update stores set store_type = ${lit(COL0)}, grade = null  where id = ${storeZero};
+          update stores set store_type = 'TEST MML yo‘q tur', grade = null where id = ${storeNone};
+          update stores set store_type = ${lit(COLL)}, grade = null  where id = ${storeOld};
+          update stores set store_type = 'Kitob do''kon', grade = 'A++' where id = ${storeApp};`)
   })
   after(() => {
     clean()
-    psql(`update stores set store_type = ${lit(saved.store_type)}, grade = ${lit(saved.grade)},
-                            owner_id = ${lit(saved.owner_id)}::uuid where id = ${store}`)
+    for (const s of saved) {
+      psql(`update stores set store_type = ${lit(s.store_type)}, grade = ${lit(s.grade)},
+                              owner_id = ${lit(s.owner_id)}::uuid where id = ${s.id}`)
+    }
+    psql(`delete from books where title like 'TEST MML %'`)
   })
 
-  test('targets round up, in exact decimals', () => {
-    const t = Object.fromEntries(psql(`select string_agg(book_category || '=' || target, ',')
-      from v_mml_pool_target where mml_column = '${COL}'`).split(',').map((x) => x.split('=')))
-    assert.equal(t.TESTU, '2', '3 x 0,5 = 1,5 must round up to 2')
-    assert.equal(t.TESTK, '1', '5 x 0,2 = 1 exactly, not 2')
-  })
-
-  test('a store owes its named titles plus each share, and scores null unmeasured', () => {
+  test('only a 1 is required; a 2 is optional and a 0 is not listed at all', () => {
+    const k = kinds(store)
+    assert.equal(Object.values(k).filter((x) => x === 'majburiy').length, 4)
+    assert.equal(Object.values(k).filter((x) => x === 'ixtiyoriy').length, 2)
+    assert.ok(!('TEST MML nol' in k))
     const r = row()
-    assert.equal(r.store_category, COL)
-    assert.equal(r.kerak, 1 + 2 + 1)
-    assert.equal(r.mml, null)
+    assert.equal(r.kerak, 4)
+    assert.equal(r.holat, 'olchanmagan')
+    assert.equal(r.mml, null, 'unmeasured is not 0%')
   })
 
-  test('a visit that finds everything scores 100%, never more', async () => {
-    const r = await req('/api/visits', {
-      as: U.sardor, method: 'POST',
-      body: { store_id: Number(store), present_book_ids: [named, ...share, ...tiny].map(Number) },
-    })
-    assert.equal(r.status, 201)
-    const m = row()
-    // 1 named + min(3, 2) + min(5, 1)
-    assert.equal(m.bor, 4)
-    assert.equal(m.yetishmaydi, 0)
-    assert.equal(Number(m.mml), 100)
+  test('the code column takes only 0, 1 and 2', () => {
+    assert.throws(() => psql(`insert into mml_weights (mml_column, book_id, code) values (${lit(COL)}, ${Z}, 3)
+      on conflict (mml_column, book_id) do update set code = excluded.code`))
+    assert.equal(psql(`select code from mml_weights where mml_column = ${lit(COL)} and book_id = ${Z}`), '0')
   })
 
-  test('a visit that finds one share title scores it and nothing else', async () => {
-    const r = await req('/api/visits', {
-      as: U.sardor, method: 'POST', body: { store_id: Number(store), present_book_ids: [Number(share[0])] },
-    })
-    assert.equal(r.status, 201)
-    const m = row()
-    assert.equal(m.bor, 1)
-    assert.equal(m.yetishmaydi, 3)
-    assert.equal(Number(m.mml), 25)
+  test('partial: two required on the shelf of four is 50%, and optional ones change nothing', async () => {
+    assert.equal((await visit(store, [R[0], R[1], O[0], O[1]])).status, 201)
+    const r = row()
+    assert.deepEqual([r.bor, r.yetishmaydi, Number(r.mml), r.holat], [2, 2, 50, 'olchangan'])
+
+    const shop = await req(`/api/mml/dokon?id=${store}`, { as: U.sardor })
+    assert.equal(shop.status, 200)
+    assert.equal(shop.json.mml, 50)
+    assert.deepEqual(shop.json.missing.map((m) => m.title).sort(), ['TEST MML majburiy 3', 'TEST MML majburiy 4'],
+      'only required titles can be missing')
   })
 
-  test('the endpoint names the titles and states each share', async () => {
-    const r = await req(`/api/mml?dokon=${store}`, { as: U.sardor })
-    assert.equal(r.status, 200)
-    const kinds = r.json.detail.reduce((a, d) => ((a[d.kind] = (a[d.kind] ?? 0) + 1), a), {})
-    assert.deepEqual(kinds, { nomma: 1, ulush: 8 })
-    const shares = Object.fromEntries(r.json.shares.map((x) => [x.book_category, [Number(x.target), Number(x.hisob)]]))
-    assert.deepEqual(shares, { TESTU: [2, 1], TESTK: [1, 0] })
+  test('full: every required title is 100%, with no optional one on the shelf', async () => {
+    assert.equal((await visit(store, R)).status, 201)
+    const r = row()
+    assert.deepEqual([r.bor, r.yetishmaydi, Number(r.mml)], [4, 0, 100])
+    const shop = await req(`/api/mml/dokon?id=${store}`, { as: U.sardor })
+    assert.deepEqual(shop.json.missing, [])
+  })
+
+  test('a hand-set value on an optional title does not count as measuring the shop', async () => {
+    const put = (book_id, present) => req('/api/mml/stock', {
+      as: U.komil, method: 'PUT', body: { store_id: Number(store2), book_id: Number(book_id), present } })
+    assert.equal((await put(O[0], true)).status, 200)
+    assert.equal(row(store2).holat, 'olchanmagan')
+    assert.equal((await put(R[0], true)).status, 200)
+    const r = row(store2)
+    assert.deepEqual([r.holat, r.bor, Number(r.mml)], ['olchangan', 1, 25])
+  })
+
+  test('a shop that requires nothing is listed with a reason, never scored', async () => {
+    assert.equal((await visit(storeZero, [O[0]])).status, 201)
+    const r = row(storeZero)
+    assert.deepEqual([r.kerak, r.mml, r.holat], [0, null, 'majburiy_yoq'])
+    const shop = await req(`/api/mml/dokon?id=${storeZero}`, { as: U.sardor })
+    assert.deepEqual([shop.json.holat, shop.json.mml, shop.json.missing.length], ['majburiy_yoq', null, 0])
+    const list = await req('/api/mml', { as: U.sardor })
+    assert.ok(list.json.stores.some((s) => String(s.store_id) === String(storeZero) && s.holat === 'majburiy_yoq'),
+      'it stays on the list')
+    const page = await req(`/dokon/${storeZero}`, { as: U.sardor })
+    assert.equal(page.status, 200)
+    assert.match(page.text, /majburiy kitob belgilanmagan/)
+  })
+
+  test('a shop whose type has no matrix column says so', () => {
+    assert.equal(row(storeNone).holat, 'ustun_yoq')
+  })
+
+  test('a column still holding an old share shows no MML until re-imported', async () => {
+    assert.equal((await visit(storeOld, [R[0]])).status, 201)
+    const r = row(storeOld)
+    assert.deepEqual([r.holat, r.mml], ['qoida_eskirgan', null], 'a partial figure would read as real')
+    const total = (await req('/api/mml', { as: U.komil })).json.total
+    assert.ok(Number(total.eskirgan) >= 1)
+  })
+
+  test('an A++ bookstore follows its column: a 2 stays optional, nothing else is added', () => {
+    assert.equal(psql(`select mml_column from v_store_mml_column where store_id = ${storeApp}`), "Kitob do'kon (A)")
+    assert.deepEqual(kinds(storeApp), { 'TEST MML majburiy 1': 'majburiy', 'TEST MML ixtiyoriy 1': 'ixtiyoriy' })
+    // whatever else that real column holds, the shop owes exactly its 1s —
+    // not every title in the sheet, as the old A++ rule had it
+    const ones = Number(psql(`select count(*) from mml_weights w join books b on b.id = w.book_id and b.active
+                               where w.mml_column = 'Kitob do''kon (A)' and w.code = 1`))
+    assert.equal(row(storeApp).kerak, ones)
+    assert.ok(!psql(`select string_agg(title, ',') from v_mml_book where store_id = ${storeApp} and kind = 'majburiy'`)
+      .split(',').includes('TEST MML ixtiyoriy 1'), 'a 2 never becomes required')
+  })
+
+  test('bookstores are measured by grade, other shops by type whatever the grade', () => {
+    const was = JSON.parse(psql(`select row_to_json(x) from (select store_type, grade from stores where id = ${storeNone}) x`))
+    const column = (type, grade) => {
+      psql(`update stores set store_type = ${lit(type)}, grade = ${lit(grade)} where id = ${storeNone}`)
+      return psql(`select mml_column from v_store_mml_column where store_id = ${storeNone}`)
+    }
+    try {
+      assert.equal(column("Kitob do'kon", 'A++'), "Kitob do'kon (A)")
+      assert.equal(column("Kitob do'kon", 'A+'), "Kitob do'kon (A)")
+      assert.equal(column("Kitob do'kon", 'A'), "Kitob do'kon (A)")
+      assert.equal(column("Kitob do'kon", 'B'), "Kitob do'kon (B)")
+      assert.equal(column("Kitob do'kon", 'C'), "Kitob do'kon (C)")
+      assert.equal(column("Kitob do'kon", null), "Kitob do'kon (C)", 'an ungraded bookstore is measured as C')
+      assert.equal(column('Supermarket', 'A++'), 'Supermarket')
+    } finally {
+      psql(`update stores set store_type = ${lit(was.store_type)}, grade = ${lit(was.grade)} where id = ${storeNone}`)
+    }
+  })
+
+  test('the shop endpoint: any signed-in person, 401 without, 400/404 on a bad id', async () => {
+    assert.equal((await req(`/api/mml/dokon?id=${store}`, { as: U.otabek })).status, 200)
+    assert.equal((await req(`/api/mml/dokon?id=${store}`)).status, 401)
+    assert.equal((await req('/api/mml/dokon?id=abc', { as: U.sardor })).status, 400)
+    assert.equal((await req('/api/mml/dokon?id=999999999', { as: U.sardor })).status, 404)
   })
 
   test('marking a title on the shelf by hand counts, and clearing it does not', async () => {
+    assert.equal((await visit(store, [R[0]])).status, 201)
+    assert.equal(row().bor, 1)
+    const seen = () => psql(`select count(*) from visit_books vb join visits v on v.id = vb.visit_id
+                              where v.store_id = ${store} and vb.book_id = ${R[1]}`)
+    const before = seen()
     const put = await req('/api/mml/stock', {
-      as: U.komil, method: 'PUT', body: { store_id: Number(store), book_id: Number(named), present: true },
-    })
+      as: U.komil, method: 'PUT', body: { store_id: Number(store), book_id: Number(R[1]), present: true } })
     assert.equal(put.status, 200)
     assert.equal(row().bor, 2)
-    // the visit itself is never edited
-    assert.equal(psql(`select count(*) from visit_books vb join visits v on v.id = vb.visit_id
-                        where v.store_id = ${store} and vb.book_id = ${named}`), '1')
+    assert.equal(seen(), before, 'the visit itself is never edited')
     const del = await req('/api/mml/stock', {
-      as: U.komil, method: 'DELETE', body: { store_id: Number(store), book_id: Number(named) },
-    })
+      as: U.komil, method: 'DELETE', body: { store_id: Number(store), book_id: Number(R[1]) } })
     assert.equal(del.status, 200)
     assert.equal(row().bor, 1)
   })
@@ -1918,25 +2018,6 @@ describe('MML from weights: named titles and category shares', () => {
     for (const body of [{}, { store_id: 'x', book_id: 1 }, { store_id: 1, book_id: -3 }]) {
       const r = await req('/api/mml/stock', { as: U.komil, method: 'PUT', body })
       assert.equal(r.status, 400, JSON.stringify(body))
-    }
-  })
-
-  test('bookstores are measured by grade; A++ owes every title', () => {
-    const was = JSON.parse(psql(`select row_to_json(x) from (select store_type, grade from stores where id = ${store}) x`))
-    const column = (type, grade) => {
-      psql(`update stores set store_type = ${lit(type)}, grade = ${lit(grade)} where id = ${store}`)
-      return psql(`select mml_column from v_store_mml_column where store_id = ${store}`)
-    }
-    try {
-      assert.equal(column("Kitob do'kon", 'A+'), "Kitob do'kon (A)")
-      assert.equal(column("Kitob do'kon", 'A'), "Kitob do'kon (A)")
-      assert.equal(column("Kitob do'kon", 'B'), "Kitob do'kon (B)")
-      assert.equal(column("Kitob do'kon", 'C'), "Kitob do'kon (C)")
-      assert.equal(column("Kitob do'kon", null), "Kitob do'kon (C)", 'an ungraded bookstore is measured as C')
-      assert.equal(column('Kanselyariya (Kanstovar)', 'A+'), 'Kanselyariya (Kanstovar)')
-      assert.equal(column('Supermarket', 'A++'), 'Barcha kitoblar (A++)')
-    } finally {
-      psql(`update stores set store_type = ${lit(was.store_type)}, grade = ${lit(was.grade)} where id = ${store}`)
     }
   })
 
@@ -2640,17 +2721,25 @@ describe('plans that repeat', () => {
 describe('the main screen counts your own plan', () => {
   let today, s1, s2
 
-  const clean = () => psql(`delete from week_plans where store_id in (${s1},${s2});
+  const clean = () => s1 && s2 && psql(`delete from week_plans where store_id in (${s1},${s2});
     delete from visit_books where visit_id in (select id from visits where store_id in (${s1},${s2}));
     delete from visits where store_id in (${s1},${s2})`)
   const home = async (as) => (await req('/', { as })).text
 
   before(() => {
     today = psql('select current_date::text')
-    ;[s1, s2] = psql("select string_agg(id::text, ',' order by id) from (select id from stores where active order by id offset 61 limit 2) x").split(',')
-    clean()
+    const prefix = `TEST-HOME-${randomUUID()}`
+    ;[s1, s2] = psql(`with added as (
+      insert into stores (code, name, region, territory)
+      values ('${prefix}-1', 'Home fixture 1', 'Toshkent shahri', '01 test'),
+             ('${prefix}-2', 'Home fixture 2', 'Toshkent shahri', '01 test')
+      returning id
+    ) select string_agg(id::text, ',' order by id) from added`).split(',')
   })
-  after(clean)
+  after(() => {
+    clean()
+    if (s1 && s2) psql(`delete from stores where id in (${s1},${s2})`)
+  })
 
   test('with nothing planned it says so, instead of showing a number', async () => {
     assert.match(await home(U.sardor), /biriktirilmagan/)
@@ -2713,5 +2802,217 @@ describe('production self-test', () => {
     assert.equal(r.json.steps[0].state, 'ok')
     assert.match(r.json.steps[0].detail, /1 ta test do'kon/)
     assert.equal(debris(), '0')
+  })
+})
+
+describe('a region head plans for the managers of their regions', () => {
+  // db/33: a hudud_rahbari holds several regions (user_regions) and plans the
+  // week for every manager working one of them — whoever that manager reports
+  // to — for shops in those regions. Nothing outside them.
+  const H = {}
+  let day, day2, S_IN, S_OUT
+  // a CTE, not a bare insert: psql prints "INSERT 0 1" after a bare RETURNING
+  const add = (tg, name, role, region) => psql(`with x as (
+      insert into users (telegram_id, full_name, role, parent_id, region_code)
+      values (${tg}, '${name}', '${role}', '${U.jasur}', ${region ? `'${region}'` : 'null'}) returning id)
+    select id from x`)
+  const plan = (as, method, body) => req('/api/plan', { as, method, body })
+  const store = (region) => psql(`select min(id) from stores where active and region_code = '${region}'`)
+
+  before(() => {
+    H.head  = add(900000951, 'Sinov Hudud Rahbar', 'hudud_rahbari', null)
+    // reports to jasur, not to the head: the region is what makes them the head's
+    H.in    = add(900000952, 'Sinov Viloyat 40',   'sotuv_manager', '40')
+    H.out   = add(900000953, 'Sinov Viloyat 10',   'sotuv_manager', '10')
+    S_IN  = store('40')
+    S_OUT = store('10')
+    assert.ok(S_IN && S_OUT, 'needs an active shop in region 40 and in region 10')
+    day  = psql('select (week_of() + 8)::text')    // next week, Tuesday
+    day2 = psql('select (week_of() + 9)::text')
+  })
+  after(() => psql(`delete from users where telegram_id between 900000951 and 900000953`))
+
+  test('a head holds several regions, a manager cannot', async () => {
+    const r = await req(`/api/users/${H.head}`, { as: U.komil, method: 'PATCH', body: { regions: ['40', '01'] } })
+    assert.equal(r.status, 200)
+    assert.deepEqual(r.json.regions, ['01', '40'])
+    const list = (await req('/api/users', { as: U.komil })).json
+    assert.deepEqual(list.find((u) => u.id === H.head).regions, ['01', '40'])
+
+    const no = await req(`/api/users/${H.in}`, { as: U.komil, method: 'PATCH', body: { regions: ['40', '10'] } })
+    assert.equal(no.status, 400)
+    assert.equal(psql(`select count(*) from user_regions where user_id = '${H.in}'`), '0')
+  })
+
+  test('a head cannot hand themselves more regions', async () => {
+    const r = await req(`/api/users/${H.head}`, { as: H.head, method: 'PATCH', body: { regions: ['40', '01', '10'] } })
+    assert.equal(r.status, 403)
+    assert.equal(psql(`select count(*) from user_regions where user_id = '${H.head}'`), '2')
+  })
+
+  test("the board is editable and offers only the head's managers and shops", async () => {
+    const r = await req('/api/plan', { as: H.head })
+    assert.equal(r.status, 200)
+    assert.equal(r.json.canEdit, true)
+    const people = r.json.people.map((p) => p.id)
+    assert.ok(people.includes(H.in), 'the manager of region 40 is offered')
+    assert.ok(!people.includes(H.out), 'the manager of region 10 is not')
+    const s = (id) => r.json.stores.find((x) => String(x.id) === String(id))
+    assert.equal(s(S_IN).plannable, true)
+    assert.equal(s(S_OUT).plannable, false)
+  })
+
+  test("a head adds, moves and removes a task for their region's manager", async () => {
+    const add = await plan(H.head, 'POST', { user_id: H.in, store_ids: [Number(S_IN)], sanalar: [day] })
+    assert.equal(add.status, 200, JSON.stringify(add.json))
+    assert.equal(psql(`select count(*) from week_plans where store_id = ${S_IN} and visit_date = '${day}' and user_id = '${H.in}'`), '1')
+    const seen = (await req(`/api/plan?hafta=${day}`, { as: H.head })).json.rows
+    assert.ok(seen.some((x) => String(x.store_id) === String(S_IN) && x.user_id === H.in), 'the task is on their board')
+
+    const move = await plan(H.head, 'PATCH', { store_id: Number(S_IN), sana: day, yangi_sana: day2 })
+    assert.equal(move.status, 200, JSON.stringify(move.json))
+    assert.equal(psql(`select count(*) from week_plans where store_id = ${S_IN} and visit_date = '${day2}'`), '1')
+
+    const handOut = await plan(H.head, 'PATCH', { store_id: Number(S_IN), sana: day2, user_id: H.out })
+    assert.equal(handOut.status, 403, 'not to a manager of another region')
+
+    const del = await plan(H.head, 'DELETE', { store_ids: [Number(S_IN)], sana: day2 })
+    assert.equal(del.status, 200)
+    assert.equal(del.json.removed, 1)
+  })
+
+  test('outside their regions the head is refused', async () => {
+    const otherManager = await plan(H.head, 'POST', { user_id: H.out, store_ids: [Number(S_OUT)], sanalar: [day] })
+    assert.equal(otherManager.status, 403)
+    const otherShop = await plan(H.head, 'POST', { user_id: H.in, store_ids: [Number(S_OUT)], sanalar: [day] })
+    assert.equal(otherShop.status, 403)
+    assert.equal(psql(`select count(*) from week_plans where visit_date = '${day}' and store_id in (${S_IN}, ${S_OUT})`), '0')
+  })
+
+  test('a head sets up and drops a repeating plan', async () => {
+    const r = await req('/api/plan/rules', { as: H.head, method: 'POST',
+      body: { user_id: H.in, store_ids: [Number(S_IN)], sanalar: [day], takror: 'haftada' } })
+    assert.equal(r.status, 200, JSON.stringify(r.json))
+    assert.ok(r.json.planned > 0, 'the rule writes its weeks')
+    const id = psql(`select id from plan_rules where user_id = '${H.in}' and store_id = ${S_IN}`)
+    const no = await req('/api/plan/rules', { as: H.head, method: 'POST',
+      body: { user_id: H.out, store_ids: [Number(S_OUT)], sanalar: [day], takror: 'haftada' } })
+    assert.equal(no.status, 403)
+    const drop = await req('/api/plan/rules', { as: H.head, method: 'DELETE', body: { id: Number(id) } })
+    assert.equal(drop.status, 200)
+    assert.equal(psql(`select count(*) from week_plans where rule_id = ${id}`), '0')
+  })
+
+  test('a manager still cannot plan', async () => {
+    const r = await plan(H.in, 'POST', { user_id: H.in, store_ids: [Number(S_IN)], sanalar: [day] })
+    assert.equal(r.status, 403)
+    assert.equal((await req('/api/plan', { as: H.in })).json.canEdit, false)
+  })
+
+  test('someone who stops being a head stops planning', async () => {
+    const r = await req(`/api/users/${H.head}`, { as: U.komil, method: 'PATCH', body: { role: 'sotuv_manager' } })
+    assert.equal(r.status, 200)
+    assert.deepEqual(r.json.regions, [])
+    const no = await plan(H.head, 'POST', { user_id: H.in, store_ids: [Number(S_IN)], sanalar: [day] })
+    assert.equal(no.status, 403)
+  })
+})
+
+describe('agents see their own week and month', () => {
+  // db/34: a task counts in the month of its planned day, and its status is
+  // decided inside its own week exactly as on the board. The fixture week
+  // straddles a month end and is already over, so every status is final.
+  const A = {}
+  let d, d1, wk, thisWeek, today, S1, S2, S3
+  const agent = (tg, name) => psql(`with x as (
+      insert into users (telegram_id, full_name, role, parent_id)
+      values (${tg}, '${name}', 'sotuv_manager', '${U.jasur}') returning id) select id from x`)
+  const month = (as, day) => req(`/api/plan/oylik?oy=${day.slice(0, 7)}`, { as })
+  const only = (rows, who) => rows.every((r) => r.user_id === who)
+
+  before(() => {
+    A.one = agent(900000961, 'Sinov Agent Bir')
+    A.two = agent(900000962, 'Sinov Agent Ikki')
+    ;[S1, S2, S3] = psql("select string_agg(id::text, ',' order by id) from (select id from stores where active order by id offset 50 limit 3) x").split(',')
+    // the last day of a month that is not a Sunday, in a week that has ended:
+    // the next day is the same week but the next month — and that month is
+    // over too, so today's task below cannot land in it
+    d = psql(`select x::text from (
+        select (date_trunc('month', current_date) - make_interval(months => i) - interval '1 day')::date x
+          from generate_series(0, 36) i) m
+       where extract(isodow from x) < 7 and x - (extract(isodow from x)::int - 1) + 7 <= current_date
+         and x + 1 < date_trunc('month', current_date)::date
+       order by x desc limit 1`)
+    d1 = psql(`select ('${d}'::date + 1)::text`)
+    wk = psql(`select ('${d}'::date - (extract(isodow from '${d}'::date)::int - 1))::text`)
+    today = psql('select current_date::text')
+    thisWeek = psql('select week_of()::date::text')
+    psql(`insert into week_plans (week_start, visit_date, store_id, user_id) values
+            ('${wk}', '${d}',  ${S1}, '${A.one}'),
+            ('${wk}', '${d1}', ${S2}, '${A.one}'),
+            ('${wk}', '${d}',  ${S3}, '${A.two}'),
+            ('${thisWeek}', '${today}', ${S1}, '${A.one}');
+          insert into visits (manager_id, store_id, visited_at) values ('${A.one}', ${S1}, '${d1} 10:00');`)
+  })
+  after(() => psql(`delete from visits where manager_id in ('${A.one}', '${A.two}');
+                    delete from users where telegram_id in (900000961, 900000962)`))
+
+  test('a task visited the next day, across a month end, is late in the month it was planned', async () => {
+    const r = await month(A.one, d)
+    assert.equal(r.status, 200)
+    assert.equal(r.json.month, `${d.slice(0, 7)}-01`)
+    assert.equal(r.json.rows.length, 1)
+    const s = r.json.rows[0]
+    assert.deepEqual([s.reja, s.bajarildi, s.vaqtida, s.kechikdi, s.qoldi, s.borilmadi].map(Number), [1, 1, 0, 1, 0, 0])
+    assert.equal(Number(s.foiz), 100)
+  })
+
+  test('the next month counts only its own day, which nobody visited', async () => {
+    const s = (await month(A.one, d1)).json.rows.find((r) => r.user_id === A.one)
+    assert.deepEqual([s.reja, s.bajarildi, s.kechikdi, s.qoldi, s.borilmadi].map(Number), [1, 0, 0, 1, 1])
+    assert.equal(Number(s.foiz), 0)
+  })
+
+  test('the week holds both days, so each task is counted once in a week and once in a month', async () => {
+    const r = await req(`/api/plan?hafta=${wk}`, { as: A.one })
+    assert.equal(r.status, 200)
+    assert.equal(r.json.summary.length, 1)
+    const s = r.json.summary[0]
+    assert.deepEqual([s.reja, s.vaqtida, s.kechikdi, s.qoldi, s.borilmadi].map(Number), [2, 0, 1, 1, 1])
+    assert.equal(Number(s.foiz), 50)
+    assert.deepEqual(r.json.rows.map((x) => x.holat).sort(), ['borilmadi', 'kechikdi'])
+  })
+
+  test("an agent sees only their own board and months, never another agent's", async () => {
+    for (const [me, other] of [[A.one, A.two], [A.two, A.one]]) {
+      const week = await req(`/api/plan?hafta=${wk}`, { as: me })
+      assert.ok(week.json.rows.length > 0 && only(week.json.rows, me), 'board rows')
+      assert.ok(only(week.json.summary, me), 'weekly summary')
+      assert.equal(week.json.canEdit, false)
+      assert.ok(only((await month(me, d)).json.rows, me), 'monthly summary')
+      assert.ok(!JSON.stringify(week.json.rows).includes(other))
+    }
+    const admin = (await month(U.komil, d)).json.rows.map((r) => r.user_id)
+    assert.ok(admin.includes(A.one) && admin.includes(A.two), 'an admin sees both')
+  })
+
+  test('the home page shows the agent their own week and month', async () => {
+    const one = await req('/', { as: A.one })
+    assert.equal(one.status, 200)
+    assert.match(one.text, /Mening rejam/)
+    assert.match(one.text, /Haftalik/)
+    assert.match(one.text, /Oylik/)
+    assert.match(one.text, /href="\/admin\/reja"/, 'and their board')
+    // this week: one task, today
+    assert.match(one.text, /data-label="Reja">1</)
+    const two = await req('/', { as: A.two })
+    assert.match(two.text, /Mening rejam/, 'shown even with nothing planned this week')
+  })
+
+  test('a month must be YYYY-MM, and asking needs a session', async () => {
+    assert.equal((await req('/api/plan/oylik?oy=2026-13', { as: A.one })).status, 400)
+    assert.equal((await req('/api/plan/oylik?oy=noyabr', { as: A.one })).status, 400)
+    assert.equal((await req('/api/plan/oylik')).status, 401)
+    assert.equal((await req('/api/plan/oylik', { as: A.one })).status, 200, 'no month means this month')
   })
 })

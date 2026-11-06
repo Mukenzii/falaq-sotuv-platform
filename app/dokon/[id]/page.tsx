@@ -3,6 +3,7 @@ import { sql } from 'drizzle-orm'
 import Link from 'next/link'
 import { asUser } from '@/lib/db'
 import { currentUserId } from '@/lib/session'
+import { MML_HOLAT, type MmlHolat } from '@/lib/mml'
 
 const money = new Intl.NumberFormat('uz-UZ')
 const day = new Intl.DateTimeFormat('uz-UZ', { day: '2-digit', month: 'long', year: 'numeric' })
@@ -41,6 +42,13 @@ export default async function StoreDetail({ params }: { params: Promise<{ id: st
           join books b on b.id = vb.book_id
          where v.store_id = ${id} and vb.status = 'stale'
          group by 1 order by 2 desc limit 8`)).rows as any[],
+      // MML by the matrix (db/35): only required titles count or go missing
+      mml: (await db.execute(sql`
+        select kerak, bor, mml, holat, store_category from v_mml where store_id = ${id}`)).rows[0] as
+        { kerak: number; bor: number; mml: string | null; holat: MmlHolat; store_category: string | null } | undefined,
+      titles: (await db.execute(sql`
+        select title, kind, bor from v_mml_status where store_id = ${id}
+         order by book_category nulls last, title`)).rows as Array<{ title: string; kind: string; bor: boolean }>,
     }
   })
 
@@ -80,6 +88,31 @@ export default async function StoreDetail({ params }: { params: Promise<{ id: st
         <div className="drow"><dt>Borish oralig&apos;i</dt><dd>har {s.visit_every_days} kunda</dd></div>
         <div className="drow"><dt>O&apos;rtacha javon</dt><dd>{st.area ? `${st.area} m²` : '—'}</dd></div>
       </dl>
+
+      <h2>MML</h2>
+      {d.mml?.holat === 'olchangan' ? (() => {
+        const missing = d.titles!.filter((t) => t.kind === 'majburiy' && !t.bor)
+        const optional = d.titles!.filter((t) => t.kind === 'ixtiyoriy').length
+        return (
+          <>
+            <p style={{ marginTop: 0 }}>
+              <b>{Number(d.mml!.mml)}%</b> — {d.mml!.bor} / {d.mml!.kerak} majburiy kitob bor
+              <span className="hint"> · {d.mml!.store_category}{optional > 0 ? ` · ${optional} ta ixtiyoriy kitob hisobga kirmaydi` : ''}</span>
+            </p>
+            {missing.length > 0 ? (
+              <>
+                <p className="lbl">Yetishmayotgan majburiy kitoblar ({missing.length})</p>
+                <ul className="taglist bad">{missing.map((t) => <li key={t.title}>{t.title}</li>)}</ul>
+              </>
+            ) : <p className="hint">Barcha majburiy kitoblar bor.</p>}
+          </>
+        )
+      })() : (
+        <p className="hint" style={{ marginTop: 0 }}>
+          {d.mml ? MML_HOLAT[d.mml.holat] : "Do'kon faol emas — MML hisoblanmaydi"}
+          {d.mml?.holat === 'olchanmagan' ? ` · ${d.mml.kerak} ta majburiy kitob` : ''}
+        </p>
+      )}
 
       {d.stale!.length > 0 && (
         <>

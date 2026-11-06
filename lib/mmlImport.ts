@@ -1,40 +1,27 @@
 import { sql } from 'drizzle-orm'
 import { asSystem, pgArray } from '@/lib/db'
 import { readTab, mmlSource } from '@/lib/sheets'
+import { norm, parseMmlSheet, type SheetBook } from '@/lib/mmlParse'
+
+export { norm }
 
 /**
  * MML from the "Sotuv uchun" spreadsheet.
  *
- *   "MML"       one row per book, one column per kind of store. A cell is a
- *               weight: 1 = that title by name, 0,5 / 0,3 / 0,2 = that share of
- *               the book's category, 0 = not expected.
- *   "Kitoblar"  book -> category; a few titles appear only here.
+ *   "MML"       one row per book with its category ("Kat."), one column per
+ *               kind of shop; a cell is a requirement code: 1 majburiy,
+ *               2 ixtiyoriy, 0 not required (lib/mmlParse.ts, db/35).
+ *   "Kitoblar"  book -> category, for titles the matrix leaves out.
  *
- * This import only has to get the weights and the categories right. Which
- * column a store uses, the rounded-up targets and the capped score are all
- * computed by the views in db/21, in numeric.
+ * Which column a store is measured against and what counts as on the shelf are
+ * the views' business (db/21, db/35). This import only gets the codes and the
+ * categories right.
  *
- * It is one transaction, and the sheet is the source of truth: the weights are
+ * It is one transaction, and the sheet is the source of truth: the codes are
  * replaced wholesale, titles the platform lacks are added, and a book that is
- * no longer in the sheet loses its category (so it stops counting).
+ * no longer in the sheet loses its category (so it stops counting). A cell it
+ * will not guess about stops the whole import — nothing is changed.
  */
-
-/**
- * The sheet is hand-typed and the database was seeded elsewhere, so one title
- * is spelled differently in each. Uzbek Latin makes it worse: x and h are
- * interchangeable (nasixat / nasihat), the o' g' apostrophe appears as ' ’ ʻ ʼ
- * or is dropped, and "2 qism" is also written "(2)". Folding all of that away
- * is only used to pair rows up — nothing is renamed. Spellings it cannot fold
- * (digits vs words, Cyrillic) live in book_aliases.
- */
-export const norm = (s: unknown): string => String(s ?? '')
-  .toLowerCase()
-  .replace(/[‘’ʻʼ`'´]/g, '')
-  .replace(/x/g, 'h')
-  .replace(/(\d+)\s*qism/g, '$1')
-  .replace(/[^a-z0-9ʼ ]/g, '')
-  .replace(/\s+/g, ' ')
-  .trim()
 
 export type MmlReport = {
   url: string
@@ -42,77 +29,21 @@ export type MmlReport = {
   columns: string[]
   books: { total: number; matched: number; aliased: string[]; created: string[]; notInSheet: string[] }
   skipped: string[]
+  /** cells with a code, of any value */
   weights: number
-  targets: Array<{ column: string; named: number; shares: Array<{ category: string; target: number }>; total: number }>
+  /** per shop column: how many titles it requires and how many are optional */
+  targets: Array<{ column: string; required: number; optional: number }>
   at: string
-}
-
-type SheetBook = { title: string; category: string | null; weights: Map<string, string> }
-
-// " (new)" in the sheet is the category "new" in the platform
-const cleanCategory = (v: unknown): string | null => {
-  const c = String(v ?? '').trim().replace(/^\((.*)\)$/, '$1').trim()
-  return c || null
-}
-const cleanTitle = (v: unknown) => String(v ?? '').replace(/\s+/g, ' ').trim()
-const headerRow = (g: string[][]) => g.findIndex((r) => r.some((c) => /kitob nomi/i.test(String(c ?? ''))))
-
-/** Pure: the two grids -> books with categories and weights. Throws on a bad cell. */
-export function parseMmlSheet(weightsGrid: string[][], booksGrid: string[][]) {
-  const h = headerRow(weightsGrid)
-  if (h < 0) throw new Error(`MML varag'ida "Kitob nomi" ustuni topilmadi`)
-  const head = weightsGrid[h].map((c) => String(c ?? '').trim())
-  const titleCol = head.findIndex((c) => /kitob nomi/i.test(c))
-  const catCol = head.findIndex((c) => /kategoriya/i.test(c))
-  if (catCol < 0) throw new Error(`MML varag'ida "Kategoriya" ustuni topilmadi`)
-  const columns = head.map((name, at) => ({ name, at })).filter((c) => c.at > catCol && c.name)
-
-  const books = new Map<string, SheetBook>()
-  const skipped: string[] = []
-  for (const row of weightsGrid.slice(h + 1)) {
-    const title = cleanTitle(row[titleCol])
-    if (!title) continue                                    // the totals row
-    if (title.length < 3) { skipped.push(title); continue }  // a stray test row such as "dd"
-    const weights = new Map<string, string>()
-    for (const col of columns) {
-      const raw = String(row[col.at] ?? '').trim().replace(',', '.')
-      if (!raw) continue
-      const n = Number(raw)
-      if (!Number.isFinite(n) || n < 0 || n > 1) {
-        throw new Error(`MML varag'ida noto'g'ri qiymat: "${title}" / "${col.name}": "${row[col.at]}"`)
-      }
-      weights.set(col.name, raw)   // kept as the decimal string; numeric in SQL
-    }
-    books.set(norm(title), { title, category: cleanCategory(row[catCol]), weights })
-  }
-
-  const kh = headerRow(booksGrid)
-  if (kh >= 0) {
-    const khead = booksGrid[kh].map((c) => String(c ?? '').trim())
-    const kt = khead.findIndex((c) => /kitob nomi/i.test(c))
-    const kc = khead.findIndex((c) => /kategoriya/i.test(c))
-    for (const row of booksGrid.slice(kh + 1)) {
-      const title = cleanTitle(row[kt])
-      if (!title) continue
-      if (title.length < 3) { skipped.push(title); continue }
-      const category = kc >= 0 ? cleanCategory(row[kc]) : null
-      const hit = books.get(norm(title))
-      if (hit) { if (category) hit.category = category }  // Kitoblar is the category list
-      else books.set(norm(title), { title, category, weights: new Map() })
-    }
-  }
-
-  return { columns: columns.map((c) => c.name), books: [...books.values()], skipped: [...new Set(skipped)] }
 }
 
 export async function importMmlFromSheet(): Promise<MmlReport> {
   const src = mmlSource()
   if (!src) throw new Error('MML jadvali manzili sozlanmagan')
 
-  const [weightsGrid, booksGrid] = await Promise.all([readTab(src.tab, src.id), readTab(src.booksTab, src.id)])
-  const parsed = parseMmlSheet(weightsGrid, booksGrid)
+  const [matrix, booksGrid] = await Promise.all([readTab(src.tab, src.id), readTab(src.booksTab, src.id)])
+  const parsed = parseMmlSheet(matrix, booksGrid)
   // a renamed tab or a half-deleted sheet must not wipe the must-list
-  if (parsed.columns.length < 2 || parsed.books.filter((b) => b.weights.size).length < 5) {
+  if (parsed.columns.length < 2 || parsed.books.filter((b) => b.codes.size).length < 5) {
     throw new Error(`"${src.tab}" varag'i kutilgan shaklda emas — hech narsa o'zgartirilmadi`)
   }
 
@@ -153,33 +84,32 @@ export async function importMmlFromSheet(): Promise<MmlReport> {
 
       await db.execute(sql`delete from mml_weights`)
       for (const b of parsed.books) {
-        for (const [column, w] of b.weights) {
+        for (const [column, code] of b.codes) {
           await db.execute(sql`
-            insert into mml_weights (mml_column, book_id, weight)
-            values (${column}, ${idOf.get(b)!}, ${w}::numeric)
-            on conflict (mml_column, book_id) do update set weight = excluded.weight`)
+            insert into mml_weights (mml_column, book_id, code)
+            values (${column}, ${idOf.get(b)!}, ${code})
+            on conflict (mml_column, book_id) do update set code = excluded.code, weight = null`)
           weights++
         }
       }
       await db.execute(sql`commit`)
 
-      // what the sheet now asks of each column, as the views compute it
-      const named = (await db.execute(sql`
-        select w.mml_column, count(*) filter (where w.weight = 1)::int as named
+      // what the sheet now asks of each column
+      const counts = (await db.execute(sql`
+        select w.mml_column,
+               count(*) filter (where w.code = 1)::int as required,
+               count(*) filter (where w.code = 2)::int as optional
           from mml_weights w join books b on b.id = w.book_id and b.active
-         group by 1`)).rows as Array<{ mml_column: string; named: number }>
-      const shares = (await db.execute(sql`
-        select mml_column, book_category, target from v_mml_pool_target
-         order by mml_column, book_category`)).rows as Array<{ mml_column: string; book_category: string; target: number }>
+         group by 1`)).rows as Array<{ mml_column: string; required: number; optional: number }>
       const everything = Number((await db.execute(sql`
         select count(*) n from books where active and category is not null`)).rows[0].n)
 
       const targets = parsed.columns.map((column) => {
-        const s = shares.filter((x) => x.mml_column === column).map((x) => ({ category: x.book_category, target: Number(x.target) }))
-        const n = Number(named.find((x) => x.mml_column === column)?.named ?? 0)
-        return { column, named: n, shares: s, total: n + s.reduce((a, x) => a + x.target, 0) }
+        const c = counts.find((x) => x.mml_column === column)
+        return { column, required: Number(c?.required ?? 0), optional: Number(c?.optional ?? 0) }
       })
-      targets.unshift({ column: 'Barcha kitoblar (A++)', named: everything, shares: [], total: everything })
+      // grade A++ owes every title in the sheet (v_store_mml_column)
+      targets.unshift({ column: 'Barcha kitoblar (A++)', required: everything, optional: 0 })
 
       return {
         url: src.url,

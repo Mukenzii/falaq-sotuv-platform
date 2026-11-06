@@ -17,10 +17,9 @@ if (r.books.aliased.length) console.log('  linked by alias:   ' + r.books.aliase
 if (r.books.created.length) console.log('  created:           ' + r.books.created.join(' | '))
 if (r.books.notInSheet.length) console.log('  no longer counted: ' + r.books.notInSheet.join(' | '))
 if (r.skipped.length) console.log(`skipped         ${r.skipped.join(' | ')}`)
-console.log(`weights         ${r.weights}`)
-console.log('targets per column:')
+console.log(`codes           ${r.weights}`)
+console.log('per column (1 = required, 2 = optional):')
 for (const t of r.targets) {
-  const shares = t.shares.map((s) => `${s.category} ${s.target}`).join(', ')
-  console.log(`  ${t.column.padEnd(32)} ${String(t.total).padStart(3)}${shares ? `  (${t.named} named + ${shares})` : ''}`)
+  console.log(`  ${t.column.padEnd(32)} ${String(t.required).padStart(3)} required${t.optional ? `, ${t.optional} optional` : ''}`)
 }
 process.exit(0)

@@ -3,13 +3,18 @@
 import { Fragment, useEffect, useState } from 'react'
 import { StoreFilters } from '@/app/StoreFilters'
 import { storeMatches } from '@/lib/storeFilter'
+import { MML_HOLAT, MML_HOLAT_QISQA, type MmlHolat, type MmlKind } from '@/lib/mml'
 
+type Num = number | string
 type Store = {
   store_id: number; code: string; store_name: string; store_category: string | null
   territory: string | null; store_type: string | null
-  kerak: string; bor: string; yetishmaydi: string; mml: string | null; oxirgi_vizit: string | null
+  kerak: Num; bor: Num; yetishmaydi: Num; mml: Num | null; holat: MmlHolat; oxirgi_vizit: string | null
 }
-type Total = { kerak: string | null; bor: string | null; mml: string | null; hech_borilmagan: string }
+type Total = {
+  kerak: Num | null; bor: Num | null; mml: Num | null
+  hech_borilmagan: Num; borilgan?: Num; talabsiz?: Num; eskirgan?: Num
+}
 type Book = { book_id: number; title: string; book_category: string; kerak: string; yetishmaydi: string }
 type Sync = {
   tabs: { weights: string; books: string }
@@ -17,26 +22,28 @@ type Sync = {
   books: { total: number; matched: number; aliased: string[]; created: string[]; notInSheet: string[] }
   skipped: string[]
   weights: number
-  targets: Array<{ column: string; named: number; shares: Array<{ category: string; target: number }>; total: number }>
+  targets: Array<{ column: string; required: number; optional: number }>
 }
 type Row = {
   book_id: number; title: string; book_category: string | null
-  kind: 'nomma' | 'ulush'; bor: boolean; qolda: boolean
+  kind: MmlKind; bor: boolean; qolda: boolean
 }
-type Share = { book_category: string; target: number; bor: string; hisob: string }
 
-const pct = (v: string | null) => (v === null ? null : Number(v))
+const pct = (v: Num | null) => (v === null ? null : Number(v))
 
 /** The same company figure the API computes, over a filtered set of stores. */
 function totalOf(rows: Store[]): Total {
-  const seen = rows.filter((s) => s.oxirgi_vizit)
+  const seen = rows.filter((s) => s.holat === 'olchangan')
   const kerak = seen.reduce((a, s) => a + Number(s.kerak), 0)
   const bor = seen.reduce((a, s) => a + Number(s.bor), 0)
   return {
-    kerak: seen.length ? String(kerak) : null,
-    bor: seen.length ? String(bor) : null,
-    mml: kerak ? String(Math.round((1000 * bor) / kerak) / 10) : null,
-    hech_borilmagan: String(rows.length - seen.length),
+    kerak: seen.length ? kerak : null,
+    bor: seen.length ? bor : null,
+    mml: kerak ? Math.round((1000 * bor) / kerak) / 10 : null,
+    hech_borilmagan: rows.filter((s) => s.holat === 'olchanmagan').length,
+    borilgan: seen.length,
+    talabsiz: rows.filter((s) => s.holat === 'majburiy_yoq' || s.holat === 'ustun_yoq').length,
+    eskirgan: rows.filter((s) => s.holat === 'qoida_eskirgan').length,
   }
 }
 
@@ -51,27 +58,26 @@ function Bar({ value }: { value: number }) {
 }
 
 /**
- * One store's list: the titles it must carry by name, then each category it
- * owes a share of ("any 8 C titles").
- *
- * The chip itself is the "is it on the shelf" switch. A named title that is
- * missing is red; a share title that is missing is not, because no single one
- * of them is required — only enough of them.
+ * One store's list: the titles it must carry (1 in the matrix), then the ones
+ * it may carry (2). The chip itself is the "is it on the shelf" switch. A
+ * required title that is missing is red; an optional one never is, because it
+ * neither counts nor goes missing (db/35).
  */
-function Detail({ rows, shares, canEdit, saving, err, onStock }: {
-  rows: Row[]; shares: Share[]; canEdit: boolean; saving: number | null; err: string
+function Detail({ rows, holat, canEdit, saving, err, onStock }: {
+  rows: Row[]; holat: MmlHolat; canEdit: boolean; saving: number | null; err: string
   onStock: (bookId: number, present: boolean) => void
 }) {
-  const named = rows.filter((r) => r.kind === 'nomma')
-  const found = named.filter((r) => r.bor).length
+  const required = rows.filter((r) => r.kind === 'majburiy')
+  const optional = rows.filter((r) => r.kind === 'ixtiyoriy')
+  const found = required.filter((r) => r.bor).length
 
   const chip = (r: Row) => (
-    <span key={r.book_id} className={`chip ${r.kind === 'nomma' ? `on ${r.bor ? 'good' : 'bad'}` : r.bor ? 'on good' : ''}`}>
+    <span key={r.book_id} className={`chip ${r.kind === 'majburiy' ? `on ${r.bor ? 'good' : 'bad'}` : r.bor ? 'on good' : ''}`}>
       <button type="button" className="chipmain" disabled={!canEdit || saving === r.book_id}
         aria-pressed={r.bor}
         onClick={(e) => { e.stopPropagation(); onStock(r.book_id, !r.bor) }}
         title={r.bor ? "Javonda bor — yo'q deb belgilash" : "Javonda yo'q — bor deb belgilash"}>
-        {r.bor ? '✓' : r.kind === 'nomma' ? '✕' : '·'} {r.title}
+        {r.bor ? '✓' : r.kind === 'majburiy' ? '✕' : '·'} {r.title}
         {r.qolda && <small title="qo'lda belgilangan, vizitdan emas"> ✋</small>}
       </button>
     </span>
@@ -80,32 +86,28 @@ function Detail({ rows, shares, canEdit, saving, err, onStock }: {
   return (
     <div className="mmldetail">
       {err && <div className="alert err" style={{ marginBottom: 12 }}>{err}</div>}
-      {canEdit && (
+      {holat !== 'olchangan' && <p className="hint" style={{ margin: '0 0 10px' }}>{MML_HOLAT[holat]}</p>}
+      {canEdit && rows.length > 0 && (
         <p className="hint" style={{ margin: '0 0 10px' }}>
           Kitobni bosing — javonda bor/yo&apos;q holatini o&apos;zgartiradi. Ro&apos;yxatning o&apos;zi
           Google Sheets&apos;dagi MML varag&apos;idan keladi.
         </p>
       )}
 
-      <p className="lbl">Nomma-nom kerak ({named.length}) — javonda {found} ta</p>
+      <p className="lbl">Majburiy ({required.length}) — javonda {found} ta</p>
       <div className="chips">
-        {named.length === 0 && <span className="hint">Nomma-nom talab qilinadigan kitob yo&apos;q.</span>}
-        {named.map(chip)}
+        {required.length === 0 && <span className="hint">Majburiy kitob belgilanmagan.</span>}
+        {required.map(chip)}
       </div>
 
-      {shares.map((sh) => {
-        const pool = rows.filter((r) => r.kind === 'ulush' && r.book_category === sh.book_category)
-        const bor = Number(sh.bor)
-        return (
-          <Fragment key={sh.book_category}>
-            <p className="lbl" style={{ marginTop: 14 }}>
-              {sh.book_category} toifasidan istalgan {sh.target} ta — javonda {bor} ta
-              {bor > sh.target && <span className="hint"> · {sh.target} tasi hisoblanadi</span>}
-            </p>
-            <div className="chips">{pool.map(chip)}</div>
-          </Fragment>
-        )
-      })}
+      {optional.length > 0 && (
+        <>
+          <p className="lbl" style={{ marginTop: 14 }}>
+            Ixtiyoriy ({optional.length}) <span className="hint">— MML ga ta&apos;sir qilmaydi</span>
+          </p>
+          <div className="chips">{optional.map(chip)}</div>
+        </>
+      )}
     </div>
   )
 }
@@ -116,7 +118,6 @@ export default function MmlClient() {
       source: { id: string; url: string; tab: string; booksTab: string } | null } | null>(null)
   const [open, setOpen] = useState<number | null>(null)
   const [rows, setRows] = useState<Row[] | null>(null)
-  const [shares, setShares] = useState<Share[]>([])
   const [saving, setSaving] = useState<number | null>(null)
   const [err, setErr] = useState('')
   const [syncing, setSyncing] = useState(false)
@@ -144,18 +145,18 @@ export default function MmlClient() {
 
   async function loadDetail(id: number) {
     const r = await fetch(`/api/mml?dokon=${id}`)
-    const j = r.ok ? await r.json() : { detail: [], shares: [] }
-    setRows(j.detail); setShares(j.shares)
+    const j = r.ok ? await r.json() : { detail: [] }
+    setRows(j.detail)
   }
 
   async function show(id: number) {
     if (open === id) { setOpen(null); return }
-    setOpen(id); setRows(null); setShares([]); setErr('')
+    setOpen(id); setRows(null); setErr('')
     await loadDetail(id)
   }
 
   /**
-   * Pull the must-list out of the spreadsheet. The weights are replaced; what
+   * Pull the must-list out of the spreadsheet. The codes are replaced; what
    * someone marked as on the shelf here is kept, since that is a fact about
    * the shop and not part of the list.
    */
@@ -178,7 +179,7 @@ export default function MmlClient() {
   /**
    * Say whether a title is on the shelf. This writes store_stock, not the
    * visit: a visit records what a manager saw that day and must not be edited
-   * from here. Re-read the store afterwards, because a share caps at its target.
+   * from here. Re-read the store afterwards so its score comes from the server.
    */
   async function setStock(store_id: number, book_id: number, present: boolean) {
     setSaving(book_id); setErr('')
@@ -212,7 +213,8 @@ export default function MmlClient() {
   const shown = stores.filter((s) => storeMatches(s, hudud, turi))
   const total = filtering ? totalOf(shown) : data.total
   const company = pct(total?.mml ?? null)
-  const visited = stores.filter((s) => s.oxirgi_vizit)
+  const measured = stores.filter((s) => s.holat === 'olchangan')
+  const stale = stores.filter((s) => s.holat === 'qoida_eskirgan').length
 
   return (
     <main id="main" className="wrap-wide">
@@ -261,10 +263,8 @@ export default function MmlClient() {
             <ul style={{ margin: '4px 0 0', paddingLeft: 20 }}>
               {sync.targets.map((t) => (
                 <li key={t.column}>
-                  {t.column}: <b>{t.total}</b>
-                  {t.shares.length > 0 && (
-                    <span className="hint"> ({t.named} nomma-nom + {t.shares.map((s) => `${s.category} ${s.target}`).join(', ')})</span>
-                  )}
+                  {t.column}: <b>{t.required}</b> majburiy
+                  {t.optional > 0 && <span className="hint"> · {t.optional} ixtiyoriy</span>}
                 </li>
               ))}
             </ul>
@@ -283,21 +283,21 @@ export default function MmlClient() {
 
         <p style={{ marginBottom: 6 }}><b>1. Do&apos;kon qaysi ustun bilan o&apos;lchanadi</b></p>
         <ul style={{ color: 'var(--muted)', lineHeight: 1.8, marginTop: 0 }}>
-          <li>Toifasi <b>A++</b> — <b>Barcha kitoblar (A++)</b>: varaqdagi hamma kitob nomma-nom</li>
-          <li><b>Kitob do&apos;kon</b>, toifasi A+ yoki A — <b>Kitob do&apos;kon (A)</b></li>
+          <li><b>Kitob do&apos;kon</b>, toifasi A++, A+ yoki A — <b>Kitob do&apos;kon (A)</b></li>
           <li><b>Kitob do&apos;kon</b>, toifasi B — <b>Kitob do&apos;kon (B)</b></li>
           <li><b>Kitob do&apos;kon</b>, toifasi C yoki belgilanmagan — <b>Kitob do&apos;kon (C)</b></li>
-          <li>Boshqa turdagi do&apos;kon — o&apos;z turi nomidagi ustun</li>
+          <li>Boshqa turdagi do&apos;kon (toifasidan qat&apos;i nazar) — o&apos;z turi nomidagi ustun</li>
         </ul>
 
         <p style={{ marginBottom: 6 }}><b>2. Varaqdagi raqam nimani bildiradi</b></p>
         <ul style={{ color: 'var(--muted)', lineHeight: 1.8, marginTop: 0 }}>
-          <li><b>1</b> — shu kitob <b>nomma-nom</b> turishi shart</li>
-          <li><b>0,5 / 0,3 / 0,2</b> — kitob <b>turkumidan ulush</b>, qaysi nom bo&apos;lishi muhim emas</li>
-          <li><b>0</b> — bu do&apos;konda kutilmaydi</li>
+          <li><b>1</b> — <b>majburiy</b>: shu do&apos;konda turishi shart</li>
+          <li><b>2</b> — <b>ixtiyoriy</b>: tursa yaxshi, lekin MML ga ta&apos;sir qilmaydi va &laquo;yetishmaydi&raquo; ro&apos;yxatiga tushmaydi</li>
+          <li><b>0</b> — talab qilinmaydi (eski varaqlardagi belgi)</li>
         </ul>
         <p className="hint" style={{ marginTop: 0 }}>
-          Ulushlar qo&apos;shiladi va <b>yuqoriga yaxlitlanadi</b>: 0,3 × 25 ta C kitob = 7,5 → <b>8 ta</b>.
+          Raqam — talab, kitob soni emas. Boshqa qiymat (masalan eski 0,5) bo&apos;lsa, yangilash to&apos;xtaydi
+          va qaysi katak ekanini aytadi — hech narsa o&apos;zgarmaydi.
         </p>
 
         <p style={{ marginBottom: 6 }}><b>3. Kitob qachon &laquo;bor&raquo; hisoblanadi</b></p>
@@ -310,14 +310,13 @@ export default function MmlClient() {
         <p style={{ marginBottom: 6 }}><b>4. Foiz</b></p>
         <pre style={{ background: 'var(--bg2, rgba(0,0,0,.04))', padding: 10, borderRadius: 6,
                       overflowX: 'auto', marginTop: 0, lineHeight: 1.6 }}>
-{`kerak = nomma-nom kitoblar + ulush maqsadlari
-bor   = topilgan nomma-nom  + har turkumdan eng ko'pi bilan maqsad qadar
+{`kerak = majburiy kitoblar (1)
+bor   = ulardan javonda borlari
 MML % = 100 × bor / kerak`}
         </pre>
         <p className="hint" style={{ marginTop: 0 }}>
-          Har bir turkum <b>o&apos;z maqsadida to&apos;xtaydi</b>: 2 ta kerak bo&apos;lgan joyda 5 ta
-          topilsa ham 2 ta sanaladi — shuning uchun MML <b>100% dan oshmaydi</b>.
-          Misol: 1 nomma-nom + (3 ta 0,5 → maqsad 2) + (5 ta 0,2 → maqsad 1) = kerak <b>4</b>.
+          Ixtiyoriy (2) kitoblar na foizni oshiradi, na tushiradi. Majburiy kitobi yo&apos;q do&apos;konda
+          MML <b>yo&apos;q</b> — 100% emas; ro&apos;yxatda shu holat yozilgan holda turadi.
         </p>
         <p className="hint" style={{ marginTop: 6 }}>
           Do&apos;konga hali borilmagan va qo&apos;lda ham hech nima belgilanmagan bo&apos;lsa, MML
@@ -336,12 +335,24 @@ MML % = 100 × bor / kerak`}
           <b>{total?.kerak && total?.bor ? Number(total.kerak) - Number(total.bor) : '—'}</b>
           <span>yetishmaydi</span>
         </div>
-        <div className="tile"><b>{total?.hech_borilmagan ?? '—'}</b><span>hali borilmagan</span></div>
+        <div className="tile"><b>{total?.hech_borilmagan ?? '—'}</b><span>hali o&apos;lchanmagan</span></div>
       </div>
+      {Number(total?.talabsiz ?? 0) > 0 && (
+        <p className="hint" style={{ marginTop: -12 }}>
+          {total!.talabsiz} ta do&apos;konda majburiy kitob belgilanmagan — ular umumiy foizga kirmaydi,
+          ro&apos;yxatda holati bilan turadi.
+        </p>
+      )}
 
-      {visited.length === 0 && (
+      {stale > 0 && (
         <div className="alert err">
-          Hali birorta vizit yo&apos;q, shuning uchun MML hisoblanmadi. Menejerlar vizit
+          {stale} ta do&apos;konning ustunida eski ulush qiymatlari (0,5 / 0,3 / 0,2) qolgan — ularning MML
+          ko&apos;rsatilmaydi. {data.canEdit ? "\u201cGoogle Sheets'dan yangilash\u201d ni bosing." : 'Admin varaqni qayta yuklashi kerak.'}
+        </div>
+      )}
+      {measured.length === 0 && stale === 0 && (
+        <div className="alert err">
+          Hali birorta do&apos;kon o&apos;lchanmagan, shuning uchun MML hisoblanmadi. Menejerlar vizit
           saqlagach, bu sahifa o&apos;zi to&apos;ladi.
         </div>
       )}
@@ -376,7 +387,7 @@ MML % = 100 × bor / kerak`}
                     <td data-label="Bor">{s.bor}</td>
                     <td data-label="Yetishmaydi"><b>{s.yetishmaydi}</b></td>
                     <td data-label="MML">
-                      {v === null ? <span className="hint">borilmagan</span>
+                      {v === null ? <span className="hint">{MML_HOLAT_QISQA[s.holat]}</span>
                         : <><b>{v}%</b> <Bar value={v} /></>}
                     </td>
                     <td data-label="Oxirgi vizit">{s.oxirgi_vizit ?? <span className="hint">—</span>}</td>
@@ -385,7 +396,7 @@ MML % = 100 × bor / kerak`}
                     <tr>
                       <td colSpan={7}>
                         {rows === null ? <span className="hint">Yuklanmoqda…</span> : (
-                          <Detail rows={rows} shares={shares} canEdit={!!data.canEdit}
+                          <Detail rows={rows} holat={s.holat} canEdit={!!data.canEdit}
                                   saving={saving} err={err}
                                   onStock={(b, present) => setStock(s.store_id, b, present)} />
                         )}
@@ -401,7 +412,7 @@ MML % = 100 × bor / kerak`}
 
       <h2>Eng ko&apos;p yetishmaydigan kitoblar</h2>
       <p className="hint" style={{ marginTop: 0 }}>
-        Nomma-nom kerak bo&apos;lgan kitoblar, faqat borilgan do&apos;konlar bo&apos;yicha. Bu — yetkazib berish ro&apos;yxati.
+        Majburiy kitoblar, faqat o&apos;lchangan do&apos;konlar bo&apos;yicha. Bu — yetkazib berish ro&apos;yxati.
         {filtering && ' Filtr bu ro‘yxatga qo‘llanmaydi — barcha do‘konlar bo‘yicha.'}
       </p>
       <div className="card" style={{ overflowX: 'auto' }}>

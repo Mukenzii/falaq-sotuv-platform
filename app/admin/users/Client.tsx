@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from 'react'
 import { MIN_PASSWORD, normalizeUsername, suggestUsername } from '@/lib/password.shared'
+import RegionPicker from './RegionPicker'
 
 type User = {
   id: string
@@ -14,6 +15,8 @@ type User = {
   active: boolean
   region_code: string | null
   hudud: string | null
+  // a hudud_rahbari's regions (db/33); a manager has region_code instead
+  regions: string[]
   dokonlar: number
   has_password: boolean
   must_change_password: boolean
@@ -28,7 +31,9 @@ const ROLES = ['direktor', 'sotuv_boshligi', 'hudud_rahbari', 'sotuv_manager']
 const BLANK = {
   username: '', password: '', full_name: '', phone: '', role: 'sotuv_manager',
   parent_id: '', region_code: '',
+  regions: [] as string[],
 }
+const HEAD = 'hudud_rahbari'
 
 export default function UsersClient() {
   const [users, setUsers] = useState<User[]>([])
@@ -173,14 +178,17 @@ export default function UsersClient() {
                 <option value="">— yo&apos;q —</option>
                 {users.map((o) => <option key={o.id} value={o.id}>{o.full_name}</option>)}
               </select></div>
-            <div><label>Hudud</label>
-              <select value={draft.region_code}
-                onChange={(e) => setDraft({ ...draft, region_code: e.target.value })}>
-                <option value="">— yo&apos;q —</option>
-                {regions.map((g) => (
-                  <option key={g.code} value={g.code}>{g.name} ({g.dokonlar})</option>
-                ))}
-              </select></div>
+            <div><label>{draft.role === HEAD ? 'Hududlar' : 'Hudud'}</label>
+              {draft.role === HEAD
+                ? <RegionPicker value={draft.regions} regions={regions} name={draft.full_name || 'Yangi xodim'}
+                    onChange={(next) => { setDraft({ ...draft, regions: next }); return true }} />
+                : <select value={draft.region_code}
+                    onChange={(e) => setDraft({ ...draft, region_code: e.target.value })}>
+                    <option value="">— yo&apos;q —</option>
+                    {regions.map((g) => (
+                      <option key={g.code} value={g.code}>{g.name} ({g.dokonlar})</option>
+                    ))}
+                  </select>}</div>
           </div>
           <button className="btn" disabled={!canSave}
             onClick={async () => {
@@ -188,7 +196,8 @@ export default function UsersClient() {
                 ...draft,
                 parent_id: draft.parent_id || null,
                 phone: draft.phone || null,
-                region_code: draft.region_code || null,
+                region_code: draft.role === HEAD ? null : draft.region_code || null,
+                regions: draft.role === HEAD ? draft.regions : [],
               })
               if (ok) {
                 setIssued({ full_name: draft.full_name.trim(), username: draft.username, password: draft.password })
@@ -239,20 +248,26 @@ export default function UsersClient() {
                   </select>
                 </td>
                 <td data-label="Hudud">
-                  <select value={u.region_code ?? ''}
-                    onChange={(e) => send(`/api/users/${u.id}`, 'PATCH',
-                      { region_code: e.target.value || null })}>
-                    <option value="">—</option>
-                    {regions.map((g) => (
-                      <option key={g.code} value={g.code}>{g.name} ({g.dokonlar})</option>
-                    ))}
-                  </select>
+                  {u.role === HEAD
+                    ? <RegionPicker value={u.regions ?? []} regions={regions} name={u.full_name}
+                        onChange={(next) => send(`/api/users/${u.id}`, 'PATCH', { regions: next })} />
+                    : <select value={u.region_code ?? ''}
+                        onChange={(e) => send(`/api/users/${u.id}`, 'PATCH',
+                          { region_code: e.target.value || null })}>
+                        <option value="">—</option>
+                        {regions.map((g) => (
+                          <option key={g.code} value={g.code}>{g.name} ({g.dokonlar})</option>
+                        ))}
+                      </select>}
                 </td>
                 <td data-label="Do'konlar">
                   <span style={{ marginRight: 8 }}>{u.dokonlar}</span>
-                  <button className="btn btn-ghost btn-sm" disabled={!u.region_code}
-                    title="Shu hududdagi barcha do'konlarni shu xodimga biriktirish"
-                    onClick={() => assignRegion(u)}>Biriktirish</button>
+                  {/* a head plans their regions' managers; the shops are the managers' */}
+                  {u.role !== HEAD && (
+                    <button className="btn btn-ghost btn-sm" disabled={!u.region_code}
+                      title="Shu hududdagi barcha do'konlarni shu xodimga biriktirish"
+                      onClick={() => assignRegion(u)}>Biriktirish</button>
+                  )}
                 </td>
                 <td data-label="Parol">
                   {/* "kira olmaydi" is not a warning, it is a fact: an account

@@ -1,9 +1,10 @@
 import { NextResponse } from 'next/server'
 import { sql } from 'drizzle-orm'
-import { asSystem, asUser, pgCode } from '@/lib/db'
+import { asSystem, asUser, pgArray, pgCode } from '@/lib/db'
 import { requireUserId } from '@/lib/session'
 import { Forbidden, Unauthorized, requireAdmin } from '@/lib/auth'
 import { hashPassword, normalizeUsername, passwordProblem, usernameProblem } from '@/lib/password'
+import { regionList } from '@/lib/regions'
 
 const ROLES = ['direktor', 'sotuv_boshligi', 'hudud_rahbari', 'sotuv_manager']
 
@@ -19,6 +20,10 @@ export async function GET() {
              u.role, u.parent_id, u.active, p.full_name as parent_name,
              u.region_code, g.name as hudud,
              u.password_hash is not null as has_password, u.must_change_password,
+             -- a head's regions (db/33), in the order the regions are listed
+             (select coalesce(array_agg(r.region_code order by rg.sort), '{}')
+                from user_regions r join regions rg on rg.code = r.region_code
+               where r.user_id = u.id) as regions,
              (select count(*) from stores s where s.owner_id = u.id and s.active) as dokonlar
         from users u
         left join users p on p.id = u.parent_id
@@ -57,6 +62,14 @@ export async function POST(req: Request) {
   if (b.role && !ROLES.includes(b.role)) {
     return NextResponse.json({ error: 'Lavozim noto‘g‘ri' }, { status: 400 })
   }
+  const regions = regionList(b.regions)
+  if (regions === null) return NextResponse.json({ error: 'Hududlar noto‘g‘ri' }, { status: 400 })
+  // a head runs a list of regions (db/33); everyone else works one, in region_code
+  const head = (b.role ?? 'sotuv_manager') === 'hudud_rahbari'
+  if (!head && regions.length) {
+    return NextResponse.json({ error: 'Bir nechta hudud faqat hudud rahbariga beriladi' }, { status: 400 })
+  }
+  if (head && b.region_code && !regions.includes(b.region_code)) regions.push(b.region_code)
 
   const hash = await hashPassword(password)
 
@@ -68,10 +81,16 @@ export async function POST(req: Request) {
         insert into users (username, password_hash, must_change_password,
                            password_set_at, full_name, phone, role, parent_id, region_code)
         values (${login}, ${hash}, true, now(), ${b.full_name.trim()}, ${b.phone ?? null},
-                ${b.role ?? 'sotuv_manager'}, ${b.parent_id ?? null}, ${b.region_code || null})
+                ${b.role ?? 'sotuv_manager'}, ${b.parent_id ?? null}, ${head ? null : b.region_code || null})
         returning id, username, full_name, role, parent_id, active, region_code
       `)
-      return r.rows[0]
+      const u = r.rows[0] as { id: string }
+      if (regions.length) {
+        await db.execute(sql`
+          insert into user_regions (user_id, region_code)
+          select ${u.id}, unnest(${pgArray(regions)}::text[])`)
+      }
+      return { ...u, regions }
     })
     return NextResponse.json(row, { status: 201 })
   } catch (e: unknown) {

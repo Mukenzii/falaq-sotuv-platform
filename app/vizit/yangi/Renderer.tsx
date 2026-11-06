@@ -8,6 +8,7 @@ import { ContentBlock, QuestionField } from './QuestionFields'
 import { coreFilled, tookOrder as tookOrderOf } from '@/lib/form/core'
 import { nextSectionIndex, validateAnswer, type Answers, type AnswerValue } from '@/lib/form/answers'
 import type { Block, FormDoc, QuestionBlock, Section } from '@/lib/form/types'
+import { MML_HOLAT, scorable, scoreMml, type MmlHolat, type MmlTitle } from '@/lib/mml'
 
 /**
  * The one renderer. The managers' form and the editor's preview are the same
@@ -21,6 +22,46 @@ type Store = {
   region_code?: string; hudud?: string; visit_every_days?: number
   // the plan's own answer about this shop, when it is on this week's plan
   reja_sana?: string | null; eski?: boolean; bajarildi?: boolean
+}
+
+/** One shop's must-list as /api/mml/dokon returns it. */
+type ShopMml = { holat: MmlHolat; kerak: number; titles: MmlTitle[] }
+
+/**
+ * The shop's MML while the agent ticks what is on the shelf — the number the
+ * save will produce, by the rule the database uses (lib/mml.ts, db/35). Only
+ * required titles count and only they can be missing; a hand-set value still
+ * wins over a tick, and says so.
+ */
+function MmlPanel({ shop, present }: { shop: ShopMml; present: Set<number> }) {
+  if (!scorable(shop.holat)) {
+    return <p className="hint" style={{ marginTop: 10 }}>MML: {MML_HOLAT[shop.holat]}</p>
+  }
+  const s = scoreMml(shop.titles, present)
+  const optional = shop.titles.filter((t) => t.kind === 'ixtiyoriy').length
+  return (
+    <div className="mmldetail" aria-live="polite" style={{ marginTop: 10 }}>
+      <p style={{ margin: '0 0 8px' }}>
+        <b>MML: {s.foiz}%</b> — {s.bor} / {s.kerak} majburiy kitob bor
+        {optional > 0 && <span className="hint"> · {optional} ta ixtiyoriy kitob hisobga kirmaydi</span>}
+      </p>
+      {s.missing.length > 0 ? (
+        <>
+          <p className="lbl">Yetishmayotgan majburiy kitoblar ({s.missing.length})</p>
+          <ul className="taglist bad">
+            {s.missing.map((t) => (
+              <li key={t.book_id}>
+                {t.title}
+                {t.qolda && <small title="qo'lda belgilangan: vizitdagi belgidan ustun"> ✋</small>}
+              </li>
+            ))}
+          </ul>
+        </>
+      ) : (
+        <p className="hint" style={{ margin: 0 }}>Barcha majburiy kitoblar bor.</p>
+      )}
+    </div>
+  )
 }
 
 // index 0 is Sunday, because that is what getUTCDay() returns
@@ -145,6 +186,19 @@ export default function Renderer({
     [mine],
   )
   const chosenStore = mine.find((s) => String(s.id) === String(f.store_id))
+
+  // the chosen shop's must-list, for the MML panel under "Qaysi kitoblarimiz turibdi?"
+  const [shopMml, setShopMml] = useState<ShopMml | null>(null)
+  useEffect(() => {
+    setShopMml(null)
+    if (preview || !f.store_id) return
+    let live = true
+    fetch(`/api/mml/dokon?id=${encodeURIComponent(f.store_id)}`)
+      .then((r) => (r.ok ? r.json() : null))
+      .then((j) => { if (live && j) setShopMml(j) })
+      .catch(() => {})   // offline in the shop: the form still works, just without the panel
+    return () => { live = false }
+  }, [f.store_id, preview])
 
   /** Exactly the body POST /api/visits will receive — so the client checks the same thing. */
   const body = () => ({
@@ -367,6 +421,7 @@ export default function Renderer({
             </legend>
             <BookPicker books={books} disabled={preview} chosen={isPresent ? present : stale}
               set={isPresent ? setPresent : setStale} tone={isPresent ? 'good' : 'bad'} />
+            {isPresent && shopMml && <MmlPanel shop={shopMml} present={present} />}
           </>, true,
         )
       }

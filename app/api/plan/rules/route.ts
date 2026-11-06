@@ -45,7 +45,7 @@ export async function GET() {
         join users  u on u.id = r.user_id
        where r.active
        order by u.full_name, r.weekday, s.code`)
-    const meta = await db.execute(sql`select can_manage_users() ok`)
+    const meta = await db.execute(sql`select can_plan_any() ok`)
     return { rows: rows.rows, canEdit: !!(meta.rows[0] as { ok: boolean }).ok }
   })
 
@@ -68,7 +68,7 @@ export async function POST(req: Request) {
   if (b.tuldirish === true) {
     try {
       const planned = await asUser(me, async (db) => {
-        const admin = await db.execute(sql`select can_manage_users() ok`)
+        const admin = await db.execute(sql`select can_plan_any() ok`)
         if (!(admin.rows[0] as { ok: boolean }).ok) return 'forbidden' as const
         const r = await db.execute(sql`select plan_generate(${HORIZON_WEEKS}) n`)
         return Number((r.rows[0] as { n: number }).n)
@@ -98,7 +98,7 @@ export async function POST(req: Request) {
 
   try {
     const out = await asUser(me, async (db) => {
-      const admin = await db.execute(sql`select can_manage_users() ok`)
+      const admin = await db.execute(sql`select can_plan_any() ok`)
       if (!(admin.rows[0] as { ok: boolean }).ok) return 'forbidden' as const
 
       const r = await db.execute(sql`
@@ -142,7 +142,7 @@ export async function DELETE(req: Request) {
 
   try {
     const out = await asUser(me, async (db) => {
-      const admin = await db.execute(sql`select can_manage_users() ok`)
+      const admin = await db.execute(sql`select can_plan_any() ok`)
       if (!(admin.rows[0] as { ok: boolean }).ok) return 'forbidden' as const
 
       const cleared = await db.execute(sql`

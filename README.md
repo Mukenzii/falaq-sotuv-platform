@@ -152,6 +152,22 @@ on the team keeps by hand is safe even if its title starts with a code.
     git pull
     docker compose -f docker-compose.prod.yml --env-file .env.prod up -d --build
 
+**Development handoff requirement:** always return the production Docker rebuild
+command with development results. Run it from the existing production checkout
+(its absolute server path is not recorded here), once the approved code is there.
+Use `up -d --build`, not just `restart`, so both `app` and `falaq-sotuv-web` receive
+code changes. Do not run it on the server without separate deployment authorization.
+The Caddy helper creates a server-local override and uses `.env`; preserve that
+configuration when the override exists:
+
+```bash
+if [ -f docker-compose.caddy.yml ]; then
+  docker compose -f docker-compose.prod.yml -f docker-compose.caddy.yml --env-file .env up -d --build
+else
+  docker compose -f docker-compose.prod.yml --env-file .env.prod up -d --build
+fi
+```
+
 **New `db/*.sql` files are not applied automatically.** The init directory only
 runs on an empty volume, so apply them yourself, in order:
 
@@ -302,6 +318,126 @@ Consequences worth knowing:
 - `/admin/reja` still plans any shop for any person. Planning a shop for
   someone who does not own it now produces a task they cannot close — the plan
   says *when*, ownership says *whether*. Assign the region first.
+
+### Region heads (db/33)
+
+A **hudud_rahbari** runs any number of regions — ticked in the Hudud column of
+`/admin/users` and stored in `user_regions`. A manager still has exactly one,
+in `users.region_code`.
+
+A head's workers are the **managers whose region is one of the head's
+regions**, whoever they report to. On `/admin/reja` a head adds, moves, hands
+over and removes tasks and repeating rules for those workers, for shops in
+those regions, and for nobody and nothing else. `can_plan(worker, shop)` is
+that rule, and every write policy on `week_plans`, `plan_rules` and
+`plan_rule_skips` is that function — the route only asks `can_plan_any()` to
+decide whether the board is editable at all. Admins plan everything, as before.
+
+A head sees those workers in the user list, so their tasks show on the board;
+what visits a head can open is unchanged (their branch). Someone who stops being
+a head loses their regions in the same save.
+
+## Staff self-edits (db/32)
+
+Non-admin users can update only their own `full_name` and `phone`. Role,
+Login identity, activity, hierarchy and region assignments require an admin.
+The API rejects a request containing protected fields in full; a database
+trigger independently enforces the same limit, protecting new columns by default.
+Profile edits do not change a region head's assigned regions. Trusted owner
+connections for sign-in and migrations still work.
+
+Existing databases must apply `db/32_self_update_guard.sql`;
+rebuilding the app alone does not install the database guard.
+
+`tests/user-permissions.test.mjs` verifies API and direct-database enforcement.
+It requires `TEST_DATABASE_URL`, `TEST_DATABASE_URL_OWNER`, `TEST_BASE` and
+`SESSION_SECRET` for a disposable local instance. It creates and removes only
+its own fixture users, and skips when the explicit test database URLs are absent.
+
+### Offline verification
+
+Run the API suite only in a disposable database: its existing setup deletes visits.
+The server and test process must share the same local configuration and session
+secret. Use an explicit `TEST_BASE`, and point `COMPOSE_FILE` at the disposable
+database's Compose file because the API suite runs `docker compose exec db`.
+No real Telegram or Google credentials are required for the signature and local
+sync-state checks. In the test checkout only, set these synthetic values:
+
+```dotenv
+TELEGRAM_BOT_TOKEN=000000000:offline-fixture-not-a-real-bot-token
+GOOGLE_SERVICE_ACCOUNT_EMAIL=offline-fixture@example.invalid
+GOOGLE_PRIVATE_KEY=offline-fixture-not-a-valid-private-key
+SHEETS_SPREADSHEET_ID=offline_fixture_spreadsheet_00000000
+```
+
+Both the server and the tests must run with the test-only external HTTP blocker:
+
+```bash
+export NODE_OPTIONS="--require=$(pwd)/tests/support/offline-network.cjs"
+# Start the local dev server in one terminal with the same NODE_OPTIONS.
+# Run suites sequentially: the API suite has destructive global fixture hooks.
+node --test tests/api.test.mjs
+node --test tests/user-permissions.test.mjs
+node --test tests/mml.test.mjs   # pure: no server, database or network needed
+```
+
+The fake Telegram token exercises local HMAC verification. The deliberately
+invalid Google key satisfies configuration presence only; pause and lease tests
+assert the real database gates return 409 before any Google operation. External
+HTTP is rejected, not mocked as successful. These checks do not verify live bot
+delivery, Google authentication or writes to Sheets. Storage tests still upload
+to the disposable local MinIO and verify the configured public origin/port.
+
+## An agent's own plan (db/34)
+
+A `sotuv_manager` sees their own plan in two places, read-only:
+
+- **Home → "Mening rejam"**: this week and this calendar month, in the board's
+  columns (Reja, Vaqtida, Kechikib, Qoldi, Borilmadi, %).
+- **Home → "Haftalik reja"** (`/admin/reja`): their own Monday–Sunday board, with
+  the same Haftalik / Oylik switch on the summary that admins and heads get.
+
+A task counts in the month of its **planned day**; its status is still decided
+inside its own week, as on the board. So a task planned for the 30th and visited
+on the 1st of the next month (same week) is a late visit counted in the month it
+was planned. `month_summary(date)` runs under the caller's RLS: an agent gets
+their own row only, a head their regions' managers and branch, an admin everyone.
+
+## MML: 1 required, 2 optional (db/35)
+
+The "MML" tab is a matrix: one row per **book** with its book category
+(`Kat.`: A++, A+, A, B, C, New), one column per **shop category**, and in each
+cell a requirement code — **1** required, **2** optional, **0** not required (older
+sheets). A code is a requirement, never a quantity.
+
+    MML = required titles on the shelf / required titles
+
+"On the shelf" is unchanged and is a yes/no fact, not a count: a hand-set
+`store_stock` value if there is one, otherwise the last visit's "present" titles.
+Optional titles never raise or lower MML and never appear as missing. Agents see
+the shop's MML and its missing **required** titles on `/dokon/[id]` and, live as
+they tick titles, in the visit form.
+
+Every active store has a `holat` in `v_mml`; only `olchangan` carries a figure:
+`ustun_yoq` (no matrix column for its type), `majburiy_yoq` (its column requires
+nothing), `qoida_eskirgan` (see below), `olchanmagan` (not measured yet). A store
+that requires nothing is shown with that state, never as 100%.
+
+Two rules changed on purpose because the old ones contradicted the matrix:
+
+- **Grade A++ no longer means "every title".** An A++ bookstore is measured by
+  `Kitob do'kon (A)` like A+ and A; another A++ shop by its type's column. The old
+  rule turned a 2 in the shop's own column into a required, "missing" title.
+- **The 0,5 / 0,3 / 0,2 category shares are gone.** The importer refuses such a
+  cell (or any value other than 0, 1, 2), naming it, and changes nothing. A share
+  already stored keeps no code, and its column reads `qoida_eskirgan` with no
+  figure until the sheet is pulled again.
+
+**After deploying db/34 and db/35**, apply both (see §7), then press
+**"Google Sheets'dan yangilash"** on `/admin/mml` once. db/35 prints a NOTICE if any
+column still holds an old share. The import replaces every code in one
+transaction, so a column moves from the old rule to the new one in a single step;
+if the sheet has a bad cell, nothing changes and the message names the cell.
 
 ## Rules
 

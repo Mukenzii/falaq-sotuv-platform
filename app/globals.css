@@ -955,3 +955,12 @@ th.txt { text-align: left; }
 
 /* a task a rule placed, not a person */
 .krule { font-style: normal; opacity: .55; font-size: 12px; }
+
+/* a hudud rahbari's regions on /admin/users */
+.head-region-picker { min-width: 220px; max-width: 300px; white-space: normal; }
+.head-region-picker > summary { cursor: pointer; padding: 10px 4px; }
+.head-region-picker fieldset { border: 0; padding: 8px 0; margin: 0; max-height: 320px; overflow-y: auto; }
+.tablewrap tr:has(.head-region-picker[open]) td { vertical-align: top; }
+.head-region-picker fieldset label { display: flex; align-items: center; gap: 8px; min-height: 36px; margin: 0; cursor: pointer; }
+.head-region-picker input[type="checkbox"] { width: 18px; height: 18px; min-width: 18px; margin: 0; accent-color: var(--accent, #0040dd); }
+.head-region-picker fieldset:disabled label { cursor: wait; }
