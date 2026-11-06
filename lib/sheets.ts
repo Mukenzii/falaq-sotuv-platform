@@ -189,11 +189,12 @@ async function api(path: string, init?: RequestInit, spreadsheetId?: string) {
 export async function writeVisitTabs(
   tabs: Array<{ title: string; rows: (string | number | null)[][] }>,
   mark: string,
+  existing?: Array<{ sheetId: number; title: string }>,
 ): Promise<{ wrote: Record<string, number>; skipped: string[] }> {
-  // one metadata read for the whole push, not one per tab
-  const existing = await listTabs()
+  // one metadata read for the whole push, not one per tab — none if the caller has it
+  const known = existing ?? await listTabs()
 
-  const missing = tabs.filter((t) => !existing.some((e) => e.title === t.title))
+  const missing = tabs.filter((t) => !known.some((e) => e.title === t.title))
   if (missing.length) {
     await api(':batchUpdate', {
       method: 'POST',
@@ -203,14 +204,25 @@ export async function writeVisitTabs(
     })
   }
 
+  // Every tab's current content in one read. A read per tab cost ~17 of the 60
+  // reads Google allows a minute, so two pushes and a check in the same minute
+  // were refused with "Quota exceeded".
+  const current = await readTabs(tabs.map((t) => t.title))
+
   const wrote: Record<string, number> = {}
   const skipped: string[] = []
   for (const t of tabs) {
     const range = `'${t.title.replace(/'/g, "''")}'`
-    const now = await api(`/values/${encodeURIComponent(range)}`)
-    const values: unknown[][] = now.values ?? []
+    const values: unknown[][] = current.get(t.title) ?? []
     const empty = !values.some((r) => r.some((c) => String(c ?? '').trim() !== ''))
     if (!empty && values[0]?.[0] !== mark) { skipped.push(t.title); continue }
+    // Already exactly this — a region nobody visited since the last push, or an
+    // emptied one: a clear and a write would change nothing and spend two of
+    // the minute's write quota.
+    if (sameCells(values, t.rows)) {
+      wrote[t.title] = t.rows.length - 1
+      continue
+    }
 
     await api(`/values/${encodeURIComponent(range)}:clear`, { method: 'POST', body: '{}' })
     await api(
@@ -220,6 +232,36 @@ export async function writeVisitTabs(
     wrote[t.title] = t.rows.length - 1
   }
   return { wrote, skipped }
+}
+
+/**
+ * Several tabs of the export spreadsheet in ONE request. Reading them one by
+ * one costs a read per tab, and Google allows 60 a minute — a whole-sheet
+ * check that way would starve the push it is checking.
+ */
+export async function readTabs(titles: string[]): Promise<Map<string, unknown[][]>> {
+  if (!titles.length) return new Map()
+  const q = titles.map((t) => `ranges=${encodeURIComponent(`'${t.replace(/'/g, "''")}'`)}`).join('&')
+  // unformatted, so a number comes back as the number the export wrote, not "3,5"
+  const body = await api(`/values:batchGet?valueRenderOption=UNFORMATTED_VALUE&${q}`)
+  return new Map(titles.map((t, i) => [t, (body.valueRanges?.[i]?.values ?? []) as unknown[][]]))
+}
+
+/**
+ * Same cells, ignoring what the API leaves out: it drops trailing empty cells
+ * of a row and trailing empty rows, where the export writes '' or null.
+ */
+function sameCells(have: unknown[][], want: unknown[][]): boolean {
+  const norm = (rows: unknown[][]) => {
+    const out = rows.map((r) => {
+      const x = r.map((c) => c ?? '')
+      while (x.length && x[x.length - 1] === '') x.pop()
+      return x
+    })
+    while (out.length && !out[out.length - 1].length) out.pop()
+    return JSON.stringify(out)
+  }
+  return norm(have) === norm(want)
 }
 
 /** Every tab in the export spreadsheet, in the order the team sees them. */

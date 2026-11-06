@@ -95,6 +95,10 @@ export default async function Home() {
             <b>Google Sheets</b>
             <small>Vizitlarni jadvalga yuborish</small>
           </Link>
+          <Link href="/admin/tekshiruv" className="navcard">
+            <b>Tekshiruv</b>
+            <small>Test vizit yuborib, natijani tekshirish</small>
+          </Link>
         </>
       )}
     </main>
