@@ -56,8 +56,6 @@ services:
   app:
     build:
       context: .
-      args:
-        NEXT_PUBLIC_TELEGRAM_BOT_USERNAME: ${TELEGRAM_BOT_USERNAME:-}
     restart: unless-stopped
     depends_on:
       db: { condition: service_healthy }
@@ -78,8 +76,6 @@ services:
       MINIO_SECRET_KEY: ${MINIO_PASSWORD}
       MINIO_BUCKET: ${MINIO_BUCKET:-falaq-photos}
       SESSION_SECRET: ${SESSION_SECRET:?set SESSION_SECRET}
-      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
-      TELEGRAM_BOT_USERNAME: ${TELEGRAM_BOT_USERNAME:-}
       GOOGLE_SERVICE_ACCOUNT_EMAIL: ${GOOGLE_SERVICE_ACCOUNT_EMAIL:-}
       GOOGLE_PRIVATE_KEY: ${GOOGLE_PRIVATE_KEY:-}
       # full sheet URL (a bare id is still accepted)

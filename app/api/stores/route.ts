@@ -7,13 +7,13 @@ import { REF_CACHE } from '@/lib/httpCache'
 /**
  * Stores.
  *
- * ?menga=1 the shops assigned to THIS person (stores.owner_id), which is the
- *          only list the new-visit form offers and the only one the database
- *          will accept a visit against (db/25, policy v_insert). This used to
- *          be the weekly plan, with a button that opened the full store table
- *          underneath it — both are gone: a manager works one region.
- *          The plan is still joined in, so the form can still say which day a
- *          shop is wanted on and tick the ones already done.
+ * ?menga=1 the shops assigned to THIS person: theirs outright
+ *          (stores.owner_id) OR on their weekly plan. The new-visit form shows
+ *          exactly this list, and db/31 makes v_insert accept exactly the same
+ *          set, so anything offered here can actually be filed. Before db/31
+ *          only owner_id counted, and a manager whose work came from the plan
+ *          alone got an empty dropdown under a home screen promising a hundred
+ *          shops.
  * ?reja=1  shops that are overdue by visit_every_days, newest-overdue first.
  *          Shop-level and the same for everyone.
  * ?hudud=  restrict the full list to one region code ('01', '40'). For the
@@ -42,6 +42,8 @@ export async function GET(req: Request) {
            and p.user_id = current_user_id()
            and (p.week_start = week_of() or (p.week_start < week_of() and not p.bajarildi))
          where s.owner_id = current_user_id()
+            or exists (select 1 from week_plans w
+                        where w.store_id = s.id and w.user_id = current_user_id())
          group by s.id, s.code, s.name, s.region, s.region_code, s.hudud,
                   s.kun_otdi, s.visit_every_days
          order by min(p.visit_date) nulls last, s.code`)

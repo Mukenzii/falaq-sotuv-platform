@@ -8,7 +8,17 @@ create type book_status  as enum ('present','stale');
 
 create table users (
   id                uuid primary key default gen_random_uuid(),
-  telegram_id       bigint not null unique,
+  -- The login. Lowercase, unique case-insensitively (users_username_key).
+  -- NULL means the account exists but nobody can sign in to it yet.
+  username          text,
+  -- scrypt, lib/password.ts. NULL means no password and no way in.
+  password_hash     text,
+  must_change_password boolean not null default false,
+  password_set_at   timestamptz,
+  failed_logins     integer not null default 0,
+  locked_until      timestamptz,
+  -- A note, not an identity: Telegram stopped being the way in (db/29).
+  telegram_id       bigint unique,
   telegram_username text,
   full_name         text not null,
   phone             text unique,
@@ -17,9 +27,12 @@ create table users (
   parent_id         uuid references users(id) on delete set null,
   active            boolean not null default true,
   created_at        timestamptz not null default now(),
-  constraint no_self_parent check (id <> parent_id)
+  constraint no_self_parent check (id <> parent_id),
+  constraint users_username_shape
+    check (username is null or username ~ '^[a-z0-9][a-z0-9._-]{2,31}$')
 );
 create index on users(parent_id);
+create unique index users_username_key on users (lower(username));
 
 create or replace function current_user_id() returns uuid
 language sql stable as $$

@@ -142,7 +142,18 @@ legend { padding: 0; }
 .hint { color: var(--grey); font-size: 14px; margin: 7px 0 0; }
 .hint.err { color: var(--red); }
 
-input[type=text], input[type=number], input[type=time], select, textarea {
+/* A password field's show/hide toggle, on the label's line rather than under
+   the input: a second full-width control below every password box turns the
+   sign-in card into a column of five buttons. */
+.lblrow { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; margin-bottom: 7px; }
+.lblrow label { margin-bottom: 0; }
+.linkbtn {
+  border: 0; background: none; padding: 0; margin: 0;
+  font: inherit; font-size: 14px; color: var(--blue); cursor: pointer;
+}
+.linkbtn:hover { text-decoration: underline; }
+
+input[type=text], input[type=password], input[type=number], input[type=time], select, textarea {
   width: 100%; padding: 11px 12px;
   font-family: inherit; font-size: 16px; color: var(--ink);
   background: var(--paper);

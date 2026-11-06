@@ -11,10 +11,6 @@ WORKDIR /app
 COPY --from=deps /app/node_modules ./node_modules
 COPY . .
 
-# NEXT_PUBLIC_* is inlined into the client bundle at build time, so the bot
-# username has to be known here, not at run time.
-ARG NEXT_PUBLIC_TELEGRAM_BOT_USERNAME=""
-ENV NEXT_PUBLIC_TELEGRAM_BOT_USERNAME=$NEXT_PUBLIC_TELEGRAM_BOT_USERNAME
 ENV NEXT_TELEMETRY_DISABLED=1
 
 # Not `npm run build` — that script points distDir at .next-build so a local
@@ -30,6 +26,20 @@ RUN addgroup -g 1001 -S nodejs && adduser -S nextjs -u 1001
 COPY --from=build /app/public ./public
 COPY --from=build --chown=nextjs:nodejs /app/.next/standalone ./
 COPY --from=build --chown=nextjs:nodejs /app/.next/static ./.next/static
+
+# The first account cannot be made from the web app — making one needs an
+# account — so the one script that breaks that circle has to be in here. It is
+# plain ESM importing plain ESM, and pg is already in the traced node_modules
+# that standalone brought with it, so this runs under `node` with nothing else
+# installed:
+#
+#   docker compose ... exec -T app node scripts/set-password.mjs komil '<parol>' Komil
+#
+# Only this script is copied. The other files in scripts/ import .ts sources
+# that a standalone image does not have, and shipping them would promise
+# something that cannot work.
+COPY --from=build --chown=nextjs:nodejs /app/scripts/set-password.mjs ./scripts/
+COPY --from=build --chown=nextjs:nodejs /app/lib/passwordHash.mjs /app/lib/passwordRules.mjs ./lib/
 
 USER nextjs
 EXPOSE 3000

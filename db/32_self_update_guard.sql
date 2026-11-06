@@ -20,10 +20,9 @@
 -- treat it as 403. A plain RAISE would be P0001, which the users route reports
 -- as guard_last_direktor's 409.
 --
--- 29-31 are taken on other branches (region_heads, password_login); this one
--- does not depend on them. origin/password-login has its own guard_self_update
--- trigger for the same hole. This one has a different name on purpose: if both
--- end up installed, both fire, and a row has to pass the stricter of the two.
+-- This replaces guard_self_update from db/29, which listed the columns to
+-- protect and raised a plain exception. Everything it protected is covered here,
+-- so the old trigger is removed rather than left running beside this one.
 
 create or replace function guard_own_row() returns trigger
 language plpgsql as $$
@@ -40,6 +39,9 @@ begin
   end if;
   return new;
 end $$;
+
+drop trigger if exists trg_guard_self_update on users;
+drop function if exists guard_self_update();
 
 drop trigger if exists trg_guard_own_row on users;
 create trigger trg_guard_own_row

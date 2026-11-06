@@ -1,9 +1,8 @@
-import { ensureBotPolling } from '@/lib/telegramBot'
 import LoginClient from './Client'
 
-// Telegram is the only way in. Arming the bot poller here means the first
-// visit to the login screen after a restart is what wakes the bot up.
+// Nothing to arm here any more. This page used to start the Telegram bot
+// poller, because the bot was the only way in; sign-in is now a form post and
+// the page is static.
 export default function LoginPage() {
-  ensureBotPolling()
   return <LoginClient />
 }

@@ -19,8 +19,9 @@ import type { CoreKey, FormDoc, QuestionBlock } from '@/lib/form/types'
  * Since db/25 that sheet is written once per region as well: the same header
  * and the same rows, split by the region of the shop each visit was filed
  * against, so a region head opens their own tab instead of filtering 600 rows.
- * The master tab still holds every visit — splitting a sheet is only useful if
- * nothing stops being visible somewhere.
+ * A region's tab is found by the code its title starts with, so the team can
+ * rename the words after it. The master tab still holds every visit — splitting
+ * a sheet is only useful if nothing stops being visible somewhere.
  *
  * Decisions worth not re-litigating:
  *

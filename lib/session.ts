@@ -1,7 +1,11 @@
 import { createHmac, timingSafeEqual } from 'node:crypto'
 import { cookies, headers } from 'next/headers'
+import { SESSION_COOKIE } from './cookies'
 
-export const SESSION_COOKIE = 'falaq_session'
+// Re-exported so the many callers that already take it from here keep working.
+// It is defined in lib/cookies.ts because middleware.ts needs it and cannot
+// import this module: node:crypto above does not exist on the edge runtime.
+export { SESSION_COOKIE }
 const COOKIE = SESSION_COOKIE
 const MAX_AGE = 60 * 60 * 24 * 30
 

@@ -6,10 +6,12 @@ export default {
   // A package-lock.json in the home directory makes Next guess the wrong root.
   outputFileTracingRoot: import.meta.dirname,
 
-  // A cloudflare quick tunnel gives the Telegram login widget the real https
-  // domain it insists on. Next dev otherwise refuses the cross-origin /_next
-  // requests coming from that hostname. The tunnel name is random per restart,
-  // so it is matched by wildcard. Dev only — ignored by next build.
+  // Kept for testing on a phone through a cloudflare quick tunnel: Next dev
+  // otherwise refuses the cross-origin /_next requests coming from that
+  // hostname. Nothing depends on the domain any more — that was the Telegram
+  // login widget, which is gone (db/29) — but the tunnel is still the easiest
+  // way to open the site on a real phone. The name is random per restart, so
+  // it is matched by wildcard. Dev only — ignored by next build.
   allowedDevOrigins: ['*.trycloudflare.com'],
 
   // `next build` and `next dev` share .next by default, so building while the dev

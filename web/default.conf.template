@@ -16,6 +16,22 @@
 upstream app    { server ${APP_UPSTREAM}; }
 upstream photos { server ${MINIO_UPSTREAM}; }
 
+# The real client. Everything in front of this container is our own proxy, so
+# $remote_addr is only ever that proxy — the browser is the first address in
+# X-Forwarded-For.
+map $http_x_forwarded_for $client_ip {
+  default                $remote_addr;
+  "~^([^,\s]+)"         $1;
+}
+
+# Signing in is the one endpoint worth guessing at. The per-account throttle in
+# app/api/auth/login/route.ts slows somebody working through a single name; it
+# cannot see attempts running side by side, and this is the half that can.
+# 20/min with a burst of ten is far above what seven people typing a password
+# from behind one office NAT will ever need.
+limit_req_zone $client_ip zone=login:1m rate=20r/m;
+limit_req_status 429;
+
 # Keep the proxy's X-Forwarded-Proto if it sent one, else fall back to ours.
 map $http_x_forwarded_proto $forwarded_proto {
   default $http_x_forwarded_proto;
@@ -42,6 +58,20 @@ server {
   # request reached the browser over https and marks the cookie Secure.
   proxy_set_header X-Forwarded-Proto $forwarded_proto;
   proxy_http_version 1.1;
+
+  location = /api/auth/login {
+    limit_req zone=login burst=10 nodelay;
+    proxy_pass http://app;
+  }
+
+  # Answer a throttled sign-in in the shape the form already reads, so the
+  # person sees why rather than a bare "Kirish amalga oshmadi".
+  # recursive_error_pages is off by default, so this return is final.
+  error_page 429 = @rate_limited;
+  location @rate_limited {
+    default_type application/json;
+    return 429 '{"error":"Juda ko\u2018p urinish. Bir daqiqadan keyin qaytadan urinib ko\u2018ring."}';
+  }
 
   location /api/ { proxy_pass http://app; }
 
