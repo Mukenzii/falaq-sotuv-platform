@@ -184,9 +184,50 @@ export async function PATCH(req: Request) {
 }
 
 /** Take shops off the plan: one day's task with `sana`, else the whole week. */
+/**
+ * One person's whole week off the plan: { user_id, hafta }. Only tasks not yet
+ * visited go: a visited one is the record that the work was done, and deleting
+ * it would rewrite that week's numbers. Generated days are remembered as skips,
+ * as below, so the nightly top-up does not put them back; the repeating rules
+ * themselves stay until they are removed from the rules list. RLS decides which
+ * rows the caller may delete (can_plan), so a head clears only what they plan.
+ */
+async function removePersonWeek(me: string, userId: string, hafta: unknown) {
+  const week = mondayOf(typeof hafta === 'string' ? hafta : null)
+  try {
+    const out = await asUser(me, async (db) => {
+      const pending = sql`
+        select store_id, visit_date from v_week_plan
+         where week_start = ${week} and user_id = ${userId} and not bajarildi`
+      await db.execute(sql`
+        insert into plan_rule_skips (rule_id, visit_date)
+        select rule_id, visit_date from week_plans
+         where user_id = ${userId} and rule_id is not null
+           and (store_id, visit_date) in (${pending})
+        on conflict do nothing`)
+      const r = await db.execute(sql`
+        delete from week_plans
+         where user_id = ${userId} and (store_id, visit_date) in (${pending})
+        returning store_id`)
+      const left = await db.execute(sql`
+        select count(*)::int n from week_plans where user_id = ${userId} and week_start = ${week}`)
+      return { removed: r.rows.length, kept: (left.rows[0] as { n: number }).n }
+    })
+    return NextResponse.json({ week, ...out })
+  } catch (e) {
+    return fail(e)
+  }
+}
+
 export async function DELETE(req: Request) {
   const me = await requireUserId()
   const b = await req.json().catch(() => ({}))
+  if (b.user_id !== undefined && b.store_ids === undefined) {
+    if (typeof b.user_id !== 'string' || !UUID.test(b.user_id)) {
+      return NextResponse.json({ error: 'xodim tanlanmagan' }, { status: 400 })
+    }
+    return removePersonWeek(me, b.user_id, b.hafta)
+  }
   const storeIds = ids(b.store_ids)
   const day = b.sana === undefined ? null : parseDate(b.sana)
   if (!storeIds) return NextResponse.json({ error: "do'kon tanlanmagan" }, { status: 400 })

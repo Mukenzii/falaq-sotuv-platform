@@ -370,6 +370,28 @@ export default function RejaClient() {
           </div>
         </fieldset>
       )}
+      {data.canEdit && (() => {
+        // one person's week, cleared in one press: the person picked above, or
+        // the only person on the board. Visited tasks are history and stay.
+        const target = filter || (data.summary.length === 1 ? data.summary[0].user_id : '')
+        const name = data.summary.find((s) => s.user_id === target)?.full_name
+        const pending = data.rows.filter((r) => r.user_id === target && !r.bajarildi).length
+        if (!target || !name || !pending) return null
+        return (
+          <p style={{ margin: '0 0 14px' }}>
+            <button type="button" className="btn btn-danger btn-sm" disabled={busy}
+              onClick={async () => {
+                if (!confirm(`${name}ning ${ddmm(week)} haftasidagi ${pending} ta rejasi o'chirilsinmi?\n` +
+                  `Borilgan vizitlar qoladi. Takrorlanadigan qoidalar o'zgarmaydi.`)) return
+                // back to everyone: a filter on a person with nothing left shows an empty board
+                if (await call('DELETE', { user_id: target, hafta: week },
+                  `${name}ning bu haftadagi ${pending} ta rejasi o'chirildi`, 'board')) setFilter('')
+              }}>
+              {name}ning bu haftadagi rejasini o&apos;chirish ({pending} ta)
+            </button>
+          </p>
+        )
+      })()}
       {data.rows.length > 0 && (
         // counts are cards: one per shop per day, under the worker filter
         <StoreFilters stores={byWorker.map(facetOf)} hudud={boardHudud} turi={boardTuri} idPrefix="doska"

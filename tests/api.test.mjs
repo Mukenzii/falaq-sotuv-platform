@@ -2299,6 +2299,29 @@ describe('the weekly plan', () => {
     assert.equal((await req('/admin/reja', { as: U.sardor })).status, 200)
     assert.ok([302, 307].includes((await req('/admin/reja')).status))
   })
+
+  test("an admin clears one person's week; visited tasks and other people's stay", async () => {
+    clean()
+    await plan({ sana: today, user_id: U.sardor, store_ids: [Number(store), Number(third)] })
+    await plan({ sana: today, user_id: U.otabek, store_ids: [Number(other)] })
+    visitOn(U.sardor, store, today)
+    const left = (who) => psql(`select count(*) from week_plans where week_start = '${week}' and user_id = '${who}'`)
+
+    const own = await req('/api/plan', { as: U.sardor, method: 'DELETE', body: { user_id: U.sardor, hafta: week } })
+    assert.equal(own.json?.removed ?? 0, 0, 'an agent cleared their own plan')
+    assert.equal(left(U.sardor), '2')
+
+    const r = await req('/api/plan', { as: U.komil, method: 'DELETE', body: { user_id: U.sardor, hafta: week } })
+    assert.equal(r.status, 200, r.text)
+    assert.equal(r.json.removed, 1)
+    assert.equal(r.json.kept, 1, 'the visited task is the record of the work and stays')
+    assert.equal(psql(`select store_id from week_plans where week_start = '${week}' and user_id = '${U.sardor}'`), store)
+    assert.equal(left(U.otabek), '1', "someone else's week was touched")
+
+    const bad = await req('/api/plan', { as: U.komil, method: 'DELETE', body: { user_id: 'nobody', hafta: week } })
+    assert.equal(bad.status, 400)
+    clean()
+  })
 })
 
 describe('the store directory from the spreadsheet', () => {
