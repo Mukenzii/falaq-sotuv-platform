@@ -57,30 +57,45 @@ function Bar({ value }: { value: number }) {
   )
 }
 
+// the sheet's "Kat." column, best first; a title with no class goes last
+const CLASS_ORDER = ['A++', 'A+', 'A', 'B', 'C', 'NEW']
+const classRank = (c: string | null) => {
+  const i = CLASS_ORDER.indexOf((c ?? '').trim().toUpperCase())
+  return i < 0 ? CLASS_ORDER.length : i
+}
+const byClass = (a: Row, b: Row) =>
+  classRank(a.book_category) - classRank(b.book_category) || a.title.localeCompare(b.title)
+
 /**
  * One store's list: the titles it must carry (1 in the matrix), then the ones
- * it may carry (2). The chip itself is the "is it on the shelf" switch. A
- * required title that is missing is red; an optional one never is, because it
- * neither counts nor goes missing (db/35).
+ * it may carry (2), each with its class from the sheet. A row is the "is it on
+ * the shelf" switch, and a title on the shelf is gold. A required title that is
+ * missing keeps a red ✕; an optional one never does, because it neither counts
+ * nor goes missing (db/35).
  */
 function Detail({ rows, holat, canEdit, saving, err, onStock }: {
   rows: Row[]; holat: MmlHolat; canEdit: boolean; saving: number | null; err: string
   onStock: (bookId: number, present: boolean) => void
 }) {
-  const required = rows.filter((r) => r.kind === 'majburiy')
-  const optional = rows.filter((r) => r.kind === 'ixtiyoriy')
+  const required = rows.filter((r) => r.kind === 'majburiy').sort(byClass)
+  const optional = rows.filter((r) => r.kind === 'ixtiyoriy').sort(byClass)
   const found = required.filter((r) => r.bor).length
 
-  const chip = (r: Row) => (
-    <span key={r.book_id} className={`chip ${r.kind === 'majburiy' ? `on ${r.bor ? 'good' : 'bad'}` : r.bor ? 'on good' : ''}`}>
-      <button type="button" className="chipmain" disabled={!canEdit || saving === r.book_id}
+  const item = (r: Row) => (
+    <li key={r.book_id} className={r.bor ? 'bor' : r.kind === 'majburiy' ? 'yoq' : ''}>
+      <button type="button" disabled={!canEdit || saving === r.book_id}
         aria-pressed={r.bor}
         onClick={(e) => { e.stopPropagation(); onStock(r.book_id, !r.bor) }}
         title={r.bor ? "Javonda bor — yo'q deb belgilash" : "Javonda yo'q — bor deb belgilash"}>
-        {r.bor ? '✓' : r.kind === 'majburiy' ? '✕' : '·'} {r.title}
-        {r.qolda && <small title="qo'lda belgilangan, vizitdan emas"> ✋</small>}
+        <span className="holat" aria-hidden="true">{r.bor ? '✓' : r.kind === 'majburiy' ? '✕' : '·'}</span>
+        <span className="name">
+          {r.title}
+          {r.qolda && <small title="qo'lda belgilangan, vizitdan emas"> ✋</small>}
+        </span>
+        <span className="cls" title="Kitob klassi (Google Sheets, MML varag'i)">{r.book_category ?? '—'}</span>
+        <span className="sr-only">{r.bor ? 'javonda bor' : "javonda yo'q"}</span>
       </button>
-    </span>
+    </li>
   )
 
   return (
@@ -95,17 +110,16 @@ function Detail({ rows, holat, canEdit, saving, err, onStock }: {
       )}
 
       <p className="lbl">Majburiy ({required.length}) — javonda {found} ta</p>
-      <div className="chips">
-        {required.length === 0 && <span className="hint">Majburiy kitob belgilanmagan.</span>}
-        {required.map(chip)}
-      </div>
+      {required.length === 0
+        ? <p className="hint">Majburiy kitob belgilanmagan.</p>
+        : <ul className="mmllist">{required.map(item)}</ul>}
 
       {optional.length > 0 && (
         <>
           <p className="lbl" style={{ marginTop: 14 }}>
             Ixtiyoriy ({optional.length}) <span className="hint">— MML ga ta&apos;sir qilmaydi</span>
           </p>
-          <div className="chips">{optional.map(chip)}</div>
+          <ul className="mmllist">{optional.map(item)}</ul>
         </>
       )}
     </div>
