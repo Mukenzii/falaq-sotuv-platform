@@ -385,6 +385,29 @@ describe('hierarchy visibility', () => {
     assert.equal(r.json.length, Number(psql('select count(*) from users')))
   })
 
+  // db/36: a sotuv_boshligi plans for anyone, so they must see anyone. Before it,
+  // an agent outside their branch could be given a week and then be missing from
+  // the board: no cards, no row, no name to filter by.
+  test('a sotuv_boshligi sees a planned agent from outside their branch', async () => {
+    const stray = psql(`with x as (
+        insert into users (telegram_id, full_name, role) values (900000960, 'Sinov Begona', 'sotuv_manager')
+        returning id) select id from x`)
+    psql(`insert into week_plans (week_start, visit_date, store_id, user_id)
+          values (week_of(), week_of(), ${STORE_A}, '${stray}')`)
+    try {
+      const plan = (await req('/api/plan', { as: U.jasur })).json
+      assert.ok(plan.summary.some((s) => s.user_id === stray), 'missing from the Xodim buttons')
+      assert.ok(plan.rows.some((r) => r.user_id === stray), 'their cards are missing from the board')
+      assert.ok(plan.people.some((p) => p.id === stray), 'cannot be picked when planning')
+      assert.ok((await req('/api/users', { as: U.jasur })).json.some((u) => u.id === stray))
+      // and an agent still sees only their own week
+      const own = (await req('/api/plan', { as: U.sardor })).json
+      assert.ok(!own.rows.some((r) => r.user_id === stray), "an agent sees someone else's plan")
+    } finally {
+      psql(`delete from users where id = '${stray}'`)
+    }
+  })
+
   test('every signed-in person sees every store', async () => {
     // Territory was removed on 2026-09-11: shops belong to nobody, and the
     // weekly plan says who should visit what. s_read is now "signed in".
