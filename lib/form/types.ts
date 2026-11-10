@@ -19,6 +19,17 @@ export const CORE_KEYS = [
 ] as const
 export type CoreKey = (typeof CORE_KEYS)[number]
 
+/**
+ * Core questions the form cannot do without. A visit is filed against a shop,
+ * so the shop question can never be hidden: with it hidden the form loses its
+ * store list and every save is refused for want of a shop. Saving a form clears
+ * the flag on these (sanitize.ts), and every reader goes through isHidden(), so
+ * one already stored hidden is shown anyway.
+ */
+export const ALWAYS_SHOWN: readonly CoreKey[] = ['store_id']
+export const isHidden = (b: { hidden?: boolean; coreKey?: CoreKey }): boolean =>
+  !!b.hidden && !(b.coreKey && ALWAYS_SHOWN.includes(b.coreKey))
+
 export type QuestionType =
   | 'short_answer' | 'paragraph'
   | 'multiple_choice' | 'checkboxes' | 'dropdown'

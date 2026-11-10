@@ -7,7 +7,7 @@ import { Chip } from './Bits'
 import { ContentBlock, QuestionField } from './QuestionFields'
 import { coreFilled, tookOrder as tookOrderOf } from '@/lib/form/core'
 import { nextSectionIndex, validateAnswer, type Answers, type AnswerValue } from '@/lib/form/answers'
-import type { Block, FormDoc, QuestionBlock, Section } from '@/lib/form/types'
+import { isHidden, type Block, type FormDoc, type QuestionBlock, type Section } from '@/lib/form/types'
 import { MML_HOLAT, scorable, scoreMml, type MmlHolat, type MmlTitle } from '@/lib/mml'
 
 /**
@@ -220,7 +220,7 @@ export default function Renderer({
   /** Which questions are on screen right now — the only ones worth complaining about. */
   function questionsOf(list: Section[]): QuestionBlock[] {
     return list.flatMap((s) => s.blocks.filter(
-      (b): b is QuestionBlock => b.kind === 'question' && !b.hidden
+      (b): b is QuestionBlock => b.kind === 'question' && !isHidden(b)
         && !(b.coreKey === 'no_order_reason' && tookOrder)))
   }
 
@@ -489,7 +489,7 @@ export default function Renderer({
 
   function renderBlock(b: Block): React.ReactNode {
     if (b.kind !== 'question') return <ContentBlock key={b.id} block={b} />
-    if (b.hidden) return null
+    if (isHidden(b)) return null
     if (b.coreKey) return renderCore(b)
     return (
       <QuestionField key={b.id} q={b} disabled={preview}

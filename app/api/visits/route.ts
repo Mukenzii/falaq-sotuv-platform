@@ -5,7 +5,7 @@ import { requireUserId } from '@/lib/session'
 import { pushSheetsSoon } from '@/lib/sheetsSync'
 import { coreFilled, traversedSections } from '@/lib/form/core'
 import { isEmpty, validateAnswer, type Answers } from '@/lib/form/answers'
-import type { FormDoc, QuestionBlock } from '@/lib/form/types'
+import { isHidden, type FormDoc, type QuestionBlock } from '@/lib/form/types'
 
 export async function GET(req: Request) {
   const me = await requireUserId()
@@ -112,7 +112,7 @@ export async function POST(req: Request) {
     : {}
   const reached = traversedSections(published.doc, answers)
   const asked: QuestionBlock[] = reached.flatMap((s) =>
-    s.blocks.filter((x): x is QuestionBlock => x.kind === 'question' && !x.hidden))
+    s.blocks.filter((x): x is QuestionBlock => x.kind === 'question' && !isHidden(x)))
 
   for (const q of asked) {
     if (q.coreKey) {

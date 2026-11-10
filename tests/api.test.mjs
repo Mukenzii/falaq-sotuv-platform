@@ -1052,6 +1052,39 @@ describe('form builder', () => {
     draft = await getDraft()
   })
 
+  // The visit is filed against a shop. With the shop question hidden the form
+  // lost its store list and every save was refused for want of a shop, which is
+  // what agents saw on 2026-11-10.
+  test('the shop question cannot be hidden, and a stored hidden one still shows', async () => {
+    const storeBlock = (d) => d.sections.flatMap((s) => s.blocks).find((b) => b.coreKey === 'store_id')
+    const doc = structuredClone(draft.doc)
+    storeBlock(doc).hidden = true
+    assert.equal((await save(doc, draft.rev)).status, 200)
+    assert.equal(storeBlock((await getDraft()).doc).hidden, false, 'saving kept the shop question hidden')
+
+    // a form already stored that way (from before this rule) shows it anyway
+    const live = psql("select id from form_versions where status = 'published'")
+    const flag = (v) => psql(`update form_versions
+        set doc = jsonb_set(doc, array['sections', s::text, 'blocks', b::text, 'hidden'], '${v}'::jsonb)
+       from (select (s.i - 1) s, (b.i - 1) b
+               from form_versions f,
+                    jsonb_array_elements(f.doc->'sections') with ordinality s(sec, i),
+                    jsonb_array_elements(s.sec->'blocks') with ordinality b(blk, i)
+              where f.id = ${live} and b.blk->>'coreKey' = 'store_id') at_
+      where id = ${live}`)
+    flag('true')
+    try {
+      // the form is drawn in the browser (isHidden() keeps the dropdown there);
+      // what the server can be held to is that the visit still saves
+      const visit = await req('/api/visits', { as: U.sardor, method: 'POST', body: { store_id: Number(STORE_A) } })
+      assert.equal(visit.status, 201, visit.text)
+    } finally {
+      flag('false')
+    }
+    await save(draft.doc, (await getDraft()).rev)
+    draft = await getDraft()
+  })
+
   test("a core question's type cannot be changed through the API", async () => {
     const doc = structuredClone(draft.doc)
     for (const s of doc.sections) {

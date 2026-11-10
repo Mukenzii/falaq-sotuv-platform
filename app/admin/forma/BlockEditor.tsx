@@ -3,7 +3,7 @@
 import { useRef, useState } from 'react'
 import { uploadImage } from '@/lib/shrinkImage'
 import { applyTypeChange, blankOption, droppedByTypeChange, moveOption, videoEmbed } from '@/lib/form/doc'
-import { CORE_LABEL, QUESTION_TYPES, TYPE_META, type Block, type MediaBlock, type Option, type QuestionBlock, type QuestionType, type Section, type TextBlock } from '@/lib/form/types'
+import { ALWAYS_SHOWN, CORE_LABEL, QUESTION_TYPES, TYPE_META, type Block, type MediaBlock, type Option, type QuestionBlock, type QuestionType, type Section, type TextBlock } from '@/lib/form/types'
 import { QuestionField } from '@/app/vizit/yangi/QuestionFields'
 
 /**
@@ -65,8 +65,11 @@ export default function BlockEditor(p: BlockEditorProps) {
           onClick={(e) => { e.stopPropagation(); p.onDuplicate() }}>⧉</button>
         {isCore(block) ? (
           <button type="button" className="btn btn-ghost btn-sm"
+            disabled={mustShow(block)}
             aria-label={(block as QuestionBlock).hidden ? "Ko'rsatish" : 'Yashirish'}
-            title="Asosiy savolni o'chirib bo'lmaydi — yashiring"
+            title={mustShow(block)
+              ? "Do'kon ro'yxatisiz vizit saqlanmaydi — bu savolni yashirib bo'lmaydi"
+              : "Asosiy savolni o'chirib bo'lmaydi — yashiring"}
             onClick={(e) => {
               e.stopPropagation()
               p.onChange({ ...block, hidden: !(block as QuestionBlock).hidden } as Block)
@@ -82,6 +85,8 @@ export default function BlockEditor(p: BlockEditorProps) {
 }
 
 const isCore = (b: Block) => b.kind === 'question' && !!b.coreKey
+// the shop question cannot be hidden (lib/form/types.ts ALWAYS_SHOWN)
+const mustShow = (b: Block) => b.kind === 'question' && !!b.coreKey && ALWAYS_SHOWN.includes(b.coreKey)
 
 function cardLabel(b: Block): string {
   if (b.kind === 'question') return `Savol: ${b.title || 'nomsiz'}`
@@ -99,7 +104,7 @@ function Preview({ block }: { block: Block }) {
         <p className="fq-title">
           {block.title || <em>Nomsiz savol</em>}
           {block.required && <span className="req"> *</span>}
-          {block.hidden && <span className="badge">yashirin</span>}
+          {block.hidden && !mustShow(block) && <span className="badge">yashirin</span>}
         </p>
         {block.description && <p className="hint">{block.description}</p>}
         <p className="fq-type">
@@ -341,10 +346,13 @@ function QuestionEditor(p: BlockEditorProps & { block: QuestionBlock }) {
               </label>
             )}
             <label className="tick">
-              <input type="checkbox" checked={q.hidden}
+              <input type="checkbox" checked={q.hidden && !mustShow(q)} disabled={mustShow(q)}
                 onChange={(e) => set({ hidden: e.target.checked })} />
               Formadan yashirish
             </label>
+            {mustShow(q) && (
+              <p className="hint">Do&apos;kon ro&apos;yxatisiz vizit saqlanmaydi, shuning uchun bu savol doim ko&apos;rinadi.</p>
+            )}
             {core && (
               <p className="hint">
                 Bu asosiy savol: nomi, tartibi va majburiyligi o&apos;zgaradi, lekin turi va

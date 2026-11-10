@@ -1,6 +1,6 @@
 import { newId } from './doc'
 import {
-  CORE_KEYS, DOC_SCHEMA_VERSION, TYPE_META,
+  ALWAYS_SHOWN, CORE_KEYS, DOC_SCHEMA_VERSION, TYPE_META,
   type Block, type CoreKey, type FormDoc, type Option, type QuestionBlock,
   type QuestionType, type Section, type SectionNext,
 } from './types'
@@ -73,7 +73,7 @@ function question(raw: any, sectionIds: Set<string>): QuestionBlock {
     type,
     title: str(raw?.title, 300),
     required: bool(raw?.required),
-    hidden: bool(raw?.hidden),
+    hidden: coreKey && ALWAYS_SHOWN.includes(coreKey) ? false : bool(raw?.hidden),
   }
   if (coreKey) q.coreKey = coreKey
   const desc = str(raw?.description, 1000)

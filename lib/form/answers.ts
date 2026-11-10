@@ -1,4 +1,4 @@
-import { TYPE_META, type FormDoc, type QuestionBlock, type Section } from './types'
+import { TYPE_META, isHidden, type FormDoc, type QuestionBlock, type Section } from './types'
 
 /**
  * One answer value per question, keyed by block id. The shape is decided by the
@@ -214,7 +214,7 @@ export function nextSectionIndex(doc: FormDoc, si: number, answers: Answers): nu
   if (!s) return null
 
   for (const b of s.blocks) {
-    if (b.kind !== 'question' || b.hidden || !b.options) continue
+    if (b.kind !== 'question' || isHidden(b) || !b.options) continue
     if (!TYPE_META[b.type]?.single) continue
     const picked = answers[b.id]
     if (typeof picked !== 'string') continue
@@ -236,5 +236,5 @@ export function nextSectionIndex(doc: FormDoc, si: number, answers: Answers): nu
 
 /** Questions a respondent actually reached, so unvisited pages are not "missing". */
 export function visibleQuestions(section: Section): QuestionBlock[] {
-  return section.blocks.filter((b): b is QuestionBlock => b.kind === 'question' && !b.hidden)
+  return section.blocks.filter((b): b is QuestionBlock => b.kind === 'question' && !isHidden(b))
 }
