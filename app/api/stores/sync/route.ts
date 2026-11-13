@@ -3,16 +3,19 @@ import { sql } from 'drizzle-orm'
 import { asUser } from '@/lib/db'
 import { requireUserId } from '@/lib/session'
 import { hasServiceAccount, storesSource } from '@/lib/sheets'
-import { importStoresFromSheet } from '@/lib/storeImport'
+import { BigRemoval, importStoresFromSheet } from '@/lib/storeImport'
 
 export const maxDuration = 60
 
 /**
  * Rebuild the store directory from the "Sotuv uchun" spreadsheet. Admins only.
  * Shops are upserted by code; shops that left the sheet become inactive.
+ * When more than half would go, it answers 409 with the count and some of the
+ * codes, and the same call with { force: true } applies it.
  */
-export async function POST() {
+export async function POST(req: Request) {
   const me = await requireUserId()
+  const force = (await req.json().catch(() => ({})))?.force === true
 
   const allowed = await asUser(me, async (db) => {
     const r = await db.execute(sql`select can_manage_users() ok`)
@@ -25,8 +28,14 @@ export async function POST() {
   }
 
   try {
-    return NextResponse.json({ ok: true, ...(await importStoresFromSheet()) })
+    return NextResponse.json({ ok: true, ...(await importStoresFromSheet({ force })) })
   } catch (e) {
+    if (e instanceof BigRemoval) {
+      return NextResponse.json({
+        error: e.message, confirm: true,
+        leaving: e.leaving, active: e.active, inSheet: e.inSheet, sample: e.sample,
+      }, { status: 409 })
+    }
     // no access to the sheet, a renamed tab, or the safety refusal
     return NextResponse.json({
       error: (e as Error).message,

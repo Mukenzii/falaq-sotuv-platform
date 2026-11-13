@@ -16,11 +16,24 @@ export default function SyncStores() {
   const [report, setReport] = useState<Report | null>(null)
   const [err, setErr] = useState<{ m: string; account?: string } | null>(null)
 
-  async function run() {
+  async function run(force = false) {
     setBusy(true); setErr(null); setReport(null)
-    const r = await fetch('/api/stores/sync', { method: 'POST' }).catch(() => null)
+    const r = await fetch('/api/stores/sync', {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ force }),
+    }).catch(() => null)
     const j = r ? await r.json().catch(() => ({})) : {}
     setBusy(false)
+    // more than half of the shops left the sheet: say how many, name some, and
+    // apply it the moment the admin confirms
+    if (r?.status === 409 && j.confirm) {
+      const ok = confirm(
+        `Varaqda ${j.inSheet} ta do'kon bor. Bazadagi ${j.active} ta faol do'kondan ${j.leaving} tasi varaqda yo'q ` +
+        `va faolsizlantiriladi:\n${j.sample.join(', ')}${j.leaving > j.sample.length ? ' …' : ''}\n\n` +
+        `Varaqqa qaytgan do'kon keyingi yangilashda yana faol bo'ladi. Davom etilsinmi?`)
+      if (ok) await run(true)
+      else setErr({ m: `${j.leaving} ta do'kon faolsizlantirilmadi — hech narsa o'zgartirilmadi` })
+      return
+    }
     if (!r?.ok) { setErr({ m: j.error ?? 'Yangilanmadi', account: j.account }); return }
     setReport(j)
     router.refresh()
@@ -29,7 +42,7 @@ export default function SyncStores() {
   // fragments, so the alerts wrap onto their own full-width line in the header row
   return (
     <>
-      <button className="btn" onClick={run} disabled={busy}>
+      <button className="btn" onClick={() => run()} disabled={busy}>
         {busy ? 'Yangilanmoqda…' : "Google Sheets'dan yangilash"}
       </button>
       {err && (

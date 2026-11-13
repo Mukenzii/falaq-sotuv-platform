@@ -4,6 +4,7 @@
  *   npx tsx scripts/import-stores.mjs                 read the sheet, apply
  *   npx tsx scripts/import-stores.mjs --dry-run       read the sheet, print the plan only
  *   npx tsx scripts/import-stores.mjs --grids f.json  use {"<tab>": [[...]]} instead of Google
+ *   npx tsx scripts/import-stores.mjs --force         apply even if more than half of the shops leave
  *
  * --grids exists because the service account may not have access to the sheet
  * yet; the grids can come from any export of it. The logic is lib/storeImport.ts,
@@ -15,6 +16,7 @@ import { planStoreImport, applyStoreImport, readStoreTabs, storeSourceOrThrow } 
 
 const args = process.argv.slice(2)
 const dry = args.includes('--dry-run')
+const force = args.includes('--force')
 const gridsAt = args.includes('--grids') ? args[args.indexOf('--grids') + 1] : null
 
 let src, master, graded
@@ -41,7 +43,7 @@ console.log(`no territory    ${plan.noTerritory.length}: ${plan.noTerritory.join
 console.log(`no type         ${plan.noType.length}: ${plan.noType.join(' | ')}`)
 
 if (!dry) {
-  const r = await applyStoreImport(plan, src)
+  const r = await applyStoreImport(plan, src, { force })
   console.log(`inserted        ${r.inserted}`)
   console.log(`updated         ${r.updated}`)
   console.log(`retired         ${r.retired.length}: ${r.retired.join(' | ')}`)

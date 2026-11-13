@@ -167,8 +167,20 @@ export function planStoreImport(master: string[][], graded: string[][]): StorePl
   return plan
 }
 
+/**
+ * More than half of the active shops are missing from the sheet. That is how a
+ * renamed tab or a half-deleted sheet looks, so it is not done without being
+ * asked twice — but it is the admin's call: confirming applies it in one go.
+ */
+export class BigRemoval extends Error {
+  constructor(public leaving: number, public active: number, public inSheet: number, public sample: string[]) {
+    super(`${leaving} ta do'kon (faollarning yarmidan ko'pi) varaqda yo'q va faolsizlantiriladi`)
+  }
+}
+
 export async function applyStoreImport(
   plan: StorePlan, source: { url: string; tab: string; gradeTab: string },
+  { force = false }: { force?: boolean } = {},
 ): Promise<StoreReport> {
   if (!plan.stores.length) {
     throw new Error("Varaqda birorta do'kon topilmadi — varaq nomi yoki ustunlar o'zgarganmi?")
@@ -176,15 +188,15 @@ export async function applyStoreImport(
   const codes = plan.stores.map((s) => s.code)
 
   return asSystem(async (db) => {
-    // A renamed tab or a half-deleted sheet would otherwise switch off most
-    // of the shops in one press. Refuse and say so; nothing is written.
+    // A renamed tab or a half-deleted sheet would otherwise switch off most of
+    // the shops in one press, so that asks first (BigRemoval) and applies only
+    // once confirmed. Fewer than half go straight away.
     const active = Number((await db.execute(sql`select count(*) n from stores where active`)).rows[0].n)
-    const leaving = Number((await db.execute(sql`
-      select count(*) n from stores
-       where active and code <> all(${pgArray(codes)}::text[])`)).rows[0].n)
-    if (active > 20 && leaving > active / 2) {
-      throw new Error(`${leaving} ta do'kon (faollarning yarmidan ko'pi) o'chirilib qoladi — ` +
-        "varaqni tekshiring, hech narsa o'zgartirilmadi")
+    const gone = (await db.execute(sql`
+      select code from stores
+       where active and code <> all(${pgArray(codes)}::text[]) order by code`)).rows as Array<{ code: string }>
+    if (!force && active > 20 && gone.length > active / 2) {
+      throw new BigRemoval(gone.length, active, codes.length, gone.slice(0, 12).map((g) => g.code))
     }
 
     await db.execute(sql`begin`)
@@ -245,7 +257,7 @@ export async function readStoreTabs() {
   return { src, master, graded }
 }
 
-export async function importStoresFromSheet(): Promise<StoreReport> {
+export async function importStoresFromSheet(opts: { force?: boolean } = {}): Promise<StoreReport> {
   const { src, master, graded } = await readStoreTabs()
-  return applyStoreImport(planStoreImport(master, graded), src)
+  return applyStoreImport(planStoreImport(master, graded), src, opts)
 }
