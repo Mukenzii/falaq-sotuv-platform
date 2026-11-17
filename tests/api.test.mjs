@@ -2333,27 +2333,64 @@ describe('the weekly plan', () => {
     assert.ok([302, 307].includes((await req('/admin/reja')).status))
   })
 
-  test("an admin clears one person's week; visited tasks and other people's stay", async () => {
+  test("an admin clears everything planned for one person; visited tasks and other people's stay", async () => {
     clean()
+    const nextWeek = psql(`select (week_of() + 7)::text`)
     await plan({ sana: today, user_id: U.sardor, store_ids: [Number(store), Number(third)] })
+    await plan({ sana: day(nextWeek, 2), user_id: U.sardor, store_ids: [Number(fourth)] })
     await plan({ sana: today, user_id: U.otabek, store_ids: [Number(other)] })
+    const rule = await req('/api/plan/rules', {
+      as: U.komil, method: 'POST', body: { sanalar: [sunday], user_id: U.sardor, store_ids: [Number(third)], takror: 'haftada' },
+    })
+    assert.equal(rule.status, 200, rule.text)
     visitOn(U.sardor, store, today)
-    const left = (who) => psql(`select count(*) from week_plans where week_start = '${week}' and user_id = '${who}'`)
+    const count = (sqlWhere) => psql(`select count(*) from week_plans where ${sqlWhere}`)
+    const before = count(`user_id = '${U.sardor}'`)
 
-    const own = await req('/api/plan', { as: U.sardor, method: 'DELETE', body: { user_id: U.sardor, hafta: week } })
+    const own = await req('/api/plan', { as: U.sardor, method: 'DELETE', body: { user_id: U.sardor, hammasi: true } })
     assert.equal(own.json?.removed ?? 0, 0, 'an agent cleared their own plan')
-    assert.equal(left(U.sardor), '2')
+    assert.equal(count(`user_id = '${U.sardor}'`), before)
 
-    const r = await req('/api/plan', { as: U.komil, method: 'DELETE', body: { user_id: U.sardor, hafta: week } })
+    const r = await req('/api/plan', { as: U.komil, method: 'DELETE', body: { user_id: U.sardor, hammasi: true } })
     assert.equal(r.status, 200, r.text)
-    assert.equal(r.json.removed, 1)
-    assert.equal(r.json.kept, 1, 'the visited task is the record of the work and stays')
-    assert.equal(psql(`select store_id from week_plans where week_start = '${week}' and user_id = '${U.sardor}'`), store)
-    assert.equal(left(U.otabek), '1', "someone else's week was touched")
+    assert.ok(r.json.rules >= 1, 'their repeating rule was left to bring the days back')
+    assert.equal(psql(`select count(*) from plan_rules where user_id = '${U.sardor}'`), '0')
+    assert.equal(count(`user_id = '${U.sardor}' and week_start >= week_of()`), '1', 'only the visited task stays')
+    assert.equal(psql(`select store_id from week_plans where user_id = '${U.sardor}' and week_start >= week_of()`), store)
+    assert.equal(count(`user_id = '${U.otabek}' and week_start = week_of()`), '1', "someone else's plan was touched")
 
-    const bad = await req('/api/plan', { as: U.komil, method: 'DELETE', body: { user_id: 'nobody', hafta: week } })
-    assert.equal(bad.status, 400)
+    const bad = await req('/api/plan', { as: U.komil, method: 'DELETE', body: { user_id: U.sardor } })
+    assert.equal(bad.status, 400, 'clearing a person must say it means all of it')
     clean()
+    // rules lay down future weeks too, which clean() does not reach
+    psql(`delete from plan_rules where store_id in (${store}, ${other}, ${third}, ${fourth});
+          delete from week_plans where store_id in (${store}, ${other}, ${third}, ${fourth})`)
+  })
+
+  test('saving a rule says which days it could not fill, and saving it again brings removed days back', async () => {
+    clean()
+    // rules lay down future weeks too, which clean() does not reach
+    psql(`delete from plan_rules where store_id in (${store}, ${other}, ${third}, ${fourth});
+          delete from week_plans where store_id in (${store}, ${other}, ${third}, ${fourth})`)
+    // otabek already has the shop on Sunday: one person per shop per day
+    await plan({ sana: sunday, user_id: U.otabek, store_ids: [Number(other)] })
+    const body = { sanalar: [sunday], user_id: U.sardor, store_ids: [Number(other), Number(fourth)], takror: 'haftada' }
+    const r = await req('/api/plan/rules', { as: U.komil, method: 'POST', body })
+    assert.equal(r.status, 200, r.text)
+    assert.equal(r.json.why.taken, 1)
+    assert.ok(r.json.why.takenBy.some((t) => /Sinov Manager B1/.test(t.full_name ?? '')), JSON.stringify(r.json.why))
+
+    // take this Sunday off the fourth shop, then save the same rule again
+    await req('/api/plan', { as: U.komil, method: 'DELETE', body: { sana: sunday, store_ids: [Number(fourth)] } })
+    assert.equal(psql(`select count(*) from week_plans where store_id = ${fourth} and visit_date = '${sunday}'`), '0')
+    const again = await req('/api/plan/rules', { as: U.komil, method: 'POST', body })
+    assert.equal(again.json.why.skipped, 0)
+    assert.equal(psql(`select count(*) from week_plans where store_id = ${fourth} and visit_date = '${sunday}'`), '1',
+      'saving the rule again did not bring the removed day back')
+    clean()
+    // rules lay down future weeks too, which clean() does not reach
+    psql(`delete from plan_rules where store_id in (${store}, ${other}, ${third}, ${fourth});
+          delete from week_plans where store_id in (${store}, ${other}, ${third}, ${fourth})`)
   })
 })
 

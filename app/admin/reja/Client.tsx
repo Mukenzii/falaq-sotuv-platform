@@ -80,6 +80,19 @@ const ddmm = (day: string) => `${day.slice(8, 10)}.${day.slice(5, 7)}`
 const pretty = (week: string) => `${ddmm(week)} — ${ddmm(shift(week, 6))}`
 const OYLAR = ['Yanvar', 'Fevral', 'Mart', 'Aprel', 'May', 'Iyun', 'Iyul', 'Avgust', 'Sentabr', 'Oktabr', 'Noyabr', 'Dekabr']
 /** "2026-11" -> "Noyabr 2026" */
+/** Why some days of the rules just saved were not written, in one line. */
+function whyText(why?: { past: number; skipped: number; taken: number; takenBy: Array<{ code: string; full_name: string | null }> }) {
+  if (!why) return ''
+  const parts: string[] = []
+  if (why.taken) {
+    const who = why.takenBy.map((t) => `${t.code} — ${t.full_name ?? '?'}`).join(', ')
+    parts.push(`${why.taken} kun boshqa xodimga berilgan (${who}${why.taken > why.takenBy.length ? ', …' : ''})`)
+  }
+  if (why.skipped) parts.push(`${why.skipped} kun rejadan olingan`)
+  if (why.past) parts.push(`${why.past} kun o'tib ketgan`)
+  return parts.length ? `. Yozilmadi: ${parts.join('; ')}` : ''
+}
+
 const monthName = (ym: string) => `${OYLAR[Number(ym.slice(5, 7)) - 1]} ${ym.slice(0, 4)}`
 const shiftMonth = (ym: string, n: number) => {
   const d = new Date(Date.UTC(Number(ym.slice(0, 4)), Number(ym.slice(5, 7)) - 1 + n, 1))
@@ -354,7 +367,8 @@ export default function RejaClient() {
           <span key={h} className={`kstatus h-${h}`}><i aria-hidden="true">{HOLAT[h].icon}</i>{HOLAT[h].label}</span>
         ))}
       </div>
-      {data.summary.length > 1 && (
+      {/* every person with a task this week has a button, even when there is only one */}
+      {data.summary.length > 0 && (
         <fieldset style={{ marginBottom: 14 }}>
           <legend className="lbl">Xodim</legend>
           <div className="chips">
@@ -370,24 +384,26 @@ export default function RejaClient() {
           </div>
         </fieldset>
       )}
-      {data.canEdit && (() => {
-        // one person's week, cleared in one press: the person picked above, or
-        // the only person on the board. Visited tasks are history and stay.
-        const target = filter || (data.summary.length === 1 ? data.summary[0].user_id : '')
-        const name = data.summary.find((s) => s.user_id === target)?.full_name
-        const pending = data.rows.filter((r) => r.user_id === target && !r.bajarildi).length
-        if (!target || !name || !pending) return null
+      {data.canEdit && filter && (() => {
+        // the person picked above: everything planned for them, cleared in one
+        // press. Visited tasks and past weeks are history and stay.
+        const name = data.summary.find((s) => s.user_id === filter)?.full_name
+        if (!name) return null
         return (
           <p style={{ margin: '0 0 14px' }}>
             <button type="button" className="btn btn-danger btn-sm" disabled={busy}
               onClick={async () => {
-                if (!confirm(`${name}ning ${ddmm(week)} haftasidagi ${pending} ta rejasi o'chirilsinmi?\n` +
-                  `Borilgan vizitlar qoladi. Takrorlanadigan qoidalar o'zgarmaydi.`)) return
+                if (!confirm(`${name}ning barcha rejalari o'chirilsinmi?\n\n` +
+                  `Bu haftadan boshlab borilmagan hamma vazifalari va takrorlanadigan qoidalari o'chiriladi. ` +
+                  `Borilgan vizitlar va o'tgan haftalar qoladi.`)) return
                 // back to everyone: a filter on a person with nothing left shows an empty board
-                if (await call('DELETE', { user_id: target, hafta: week },
-                  `${name}ning bu haftadagi ${pending} ta rejasi o'chirildi`, 'board')) setFilter('')
+                if (await call('DELETE', { user_id: filter, hammasi: true },
+                  `${name}ning barcha rejalari o'chirildi`, 'board')) {
+                  setFilter('')
+                  await loadRules()
+                }
               }}>
-              {name}ning bu haftadagi rejasini o&apos;chirish ({pending} ta)
+              {name}ning barcha rejalarini o&apos;chirish
             </button>
           </p>
         )
@@ -560,7 +576,7 @@ export default function RejaClient() {
                   if (takror !== 'bir_marta') {
                     if (await callRules('POST',
                       { sanalar: days, user_id: who, store_ids: storeIds, takror },
-                      (j) => `${j.rules} ta qoida saqlandi — ${j.planned} ta reja ${j.weeks} haftaga yozildi`)) {
+                      (j) => `${j.rules} ta qoida saqlandi — ${j.planned} ta reja ${j.weeks} haftaga yozildi${whyText(j.why)}`)) {
                       setPicked(new Set())
                     }
                     return

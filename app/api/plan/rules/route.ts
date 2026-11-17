@@ -1,6 +1,6 @@
 import { NextResponse } from 'next/server'
 import { sql } from 'drizzle-orm'
-import { asUser, pgArray, pgCode } from '@/lib/db'
+import { asUser, pgArray, pgCode, type Tx } from '@/lib/db'
 import { requireUserId } from '@/lib/session'
 import { ensurePlanTopUp } from '@/lib/planLoop'
 import { HORIZON_WEEKS, isCadence, mondayOf, parseDate, weekdayOf } from '@/lib/plan'
@@ -60,6 +60,40 @@ export async function GET() {
  * cadences measure from. Re-saving the same shop/weekday/person edits that
  * rule instead of adding another.
  */
+/**
+ * The days these rules should fill and did not, and why: a day already given
+ * to someone else (one person per shop per day), a day taken off and kept off,
+ * or a day already past. Without it, "0 ta reja yozildi" is all the admin sees.
+ */
+async function whyNotPlanned(db: Tx, ruleIds: number[]) {
+  const days = sql`
+    select r.id, r.store_id, r.user_id, (w.w + r.weekday)::date as day
+      from plan_rules r
+     cross join (select (week_of() + (i * 7))::date w from generate_series(0, ${HORIZON_WEEKS - 1}) i) w
+     where r.id = any(${pgArray(ruleIds)}::bigint[])
+       and plan_rule_fires(r.cadence, r.anchor, r.weekday, w.w)`
+  const c = (await db.execute(sql`
+    with d as (${days})
+    select count(*) filter (where day < current_date)::int as past,
+           count(*) filter (where day >= current_date and exists (
+             select 1 from plan_rule_skips k where k.rule_id = d.id and k.visit_date = d.day))::int as skipped,
+           count(*) filter (where day >= current_date and exists (
+             select 1 from week_plans p
+              where p.store_id = d.store_id and p.visit_date = d.day and p.user_id <> d.user_id))::int as taken
+      from d`)).rows[0] as { past: number; skipped: number; taken: number }
+  const takenBy = c.taken ? (await db.execute(sql`
+    with d as (${days})
+    select distinct s.code, u.full_name
+      from d
+      join week_plans p on p.store_id = d.store_id and p.visit_date = d.day and p.user_id <> d.user_id
+      join stores s on s.id = p.store_id
+      left join users u on u.id = p.user_id
+     where d.day >= current_date
+     order by s.code
+     limit 6`)).rows as Array<{ code: string; full_name: string | null }> : []
+  return { ...c, takenBy }
+}
+
 export async function POST(req: Request) {
   const me = await requireUserId()
   const b = await req.json().catch(() => ({}))
@@ -110,14 +144,19 @@ export async function POST(req: Request) {
           set cadence = excluded.cadence, anchor = excluded.anchor, active = true
         returning id`)
 
-      // Only the rules just saved are laid down, so saving one rule cannot
-      // quietly resurrect days that were removed from another.
+      const ruleIds = (r.rows as Array<{ id: number }>).map((x) => Number(x.id))
+      // Saving a rule again means its days are wanted: days taken off it before
+      // stop being skipped. Other rules' removed days are left alone, and only
+      // the rules just saved are laid down, so nothing else comes back.
+      await db.execute(sql`
+        delete from plan_rule_skips
+         where rule_id = any(${pgArray(ruleIds)}::bigint[]) and visit_date >= current_date`)
       let planned = 0
-      for (const row of r.rows as Array<{ id: number }>) {
-        const g = await db.execute(sql`select plan_generate(${HORIZON_WEEKS}, ${row.id}) n`)
+      for (const id of ruleIds) {
+        const g = await db.execute(sql`select plan_generate(${HORIZON_WEEKS}, ${id}) n`)
         planned += Number((g.rows[0] as { n: number }).n)
       }
-      return { rules: r.rows.length, planned }
+      return { rules: ruleIds.length, planned, why: await whyNotPlanned(db, ruleIds) }
     })
 
     if (out === 'forbidden') return NextResponse.json({ error: "ruxsat yo'q" }, { status: 403 })
